@@ -1,8 +1,8 @@
-# Family Watch Night - Chrome Extension
+# Family Watch Night - Browser Extension
 
 ## Virtual Remote Control for Video Streaming Services
 
-A Chrome extension that detects and controls video playback on any streaming service. The extension finds video elements even when buried in iframes, provides playback controls (play/pause/skip), captures screenshots, and tracks playback events.
+A browser extension that detects and controls video playback on any streaming service. The extension finds video elements even when buried in iframes, provides playback controls (play/pause/skip), captures screenshots, and tracks playback events.
 
 ### Features
 
