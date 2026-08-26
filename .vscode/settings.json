@@ -1,0 +1,39 @@
+{
+  "editor.defaultFormatter": "esbenp.prettier-vscode",
+  "editor.formatOnSave": true,
+  "editor.codeActionsOnSave": {
+    "source.fixAll.eslint": "explicit",
+    "source.organizeImports": "explicit",
+    "source.addMissingImports.ts": "explicit",
+    "source.removeUnused.ts": "explicit",
+    "source.removeUnusedImports": "explicit",
+    "source.sortImports": "explicit"
+  },
+  "editor.tabSize": 2,
+  "editor.insertSpaces": true,
+
+  "js/ts.tsdk.path": "node_modules/typescript/lib",
+
+  "files.eol": "\n",
+
+  "files.exclude": {
+    "node_modules/": false,
+    "dist/": false
+  },
+  "search.exclude": {
+    "node_modules/": true,
+    "dist/": true
+  },
+
+  "files.watcherExclude": {
+    "**/node_modules/**": true
+  },
+
+  "git.enableCommitSigning": true,
+  "chat.tools.terminal.autoApprove": {
+    "/^npm\\.cmd run type-check$/": {
+      "approve": true,
+      "matchCommandLine": true
+    }
+  },
+}
