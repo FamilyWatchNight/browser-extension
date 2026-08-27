@@ -13,7 +13,7 @@ if (-not $chrome) {
 
 $workspace = Split-Path -Parent $PSScriptRoot
 $extension = Join-Path $workspace 'dist'
-$profile = Join-Path $workspace '.vscode\chrome-profile'
+$profileDir = Join-Path $workspace '.vscode\chrome-profile'
 $port = 9222
 
 if (-not (Test-Path (Join-Path $extension 'manifest.json'))) {
@@ -30,7 +30,7 @@ try {
 
 $chromeArguments = @(
   "--remote-debugging-port=$port",
-  "--user-data-dir=$profile",
+  "--user-data-dir=$profileDir",
   "--load-extension=$extension",
   '--no-first-run',
   '--no-default-browser-check',
