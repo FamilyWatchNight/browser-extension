@@ -11,8 +11,5 @@ export function isExtensionSettings(value: unknown): value is ExtensionSettings 
   }
 
   const settings = value as Partial<ExtensionSettings>
-  return (
-    typeof settings.isEnabled === 'boolean' &&
-    typeof settings.screenshotSaveLocation === 'string'
-  )
+  return typeof settings.isEnabled === 'boolean'
 }

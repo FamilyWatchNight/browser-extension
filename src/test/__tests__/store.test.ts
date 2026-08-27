@@ -12,7 +12,6 @@ describe('useExtensionStore', () => {
       playbackState: {},
       settings: {
         isEnabled: true,
-        screenshotSaveLocation: 'Downloads',
       },
     })
   })
@@ -24,13 +23,10 @@ describe('useExtensionStore', () => {
   })
 
   it('updates settings', () => {
-    const newSettings: ExtensionSettings = {
-      isEnabled: true,
-      screenshotSaveLocation: '~/screenshots',
-    }
+    const newSettings: ExtensionSettings = { isEnabled: false }
     useExtensionStore.getState().setSettings(newSettings)
     const state = useExtensionStore.getState()
-    expect(state.settings.screenshotSaveLocation).toBe('~/screenshots')
+    expect(state.settings.isEnabled).toBe(false)
   })
 
   it('toggles enabled state', () => {

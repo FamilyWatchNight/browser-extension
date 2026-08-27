@@ -41,11 +41,20 @@ export interface ActionResponse {
 
 export interface ScreenshotResponse extends ActionResponse {
   data?: string
+  contentBounds?: ScreenshotBounds
+}
+
+export interface ScreenshotBounds {
+  x: number
+  y: number
+  width: number
+  height: number
+  viewportWidth: number
+  viewportHeight: number
 }
 
 export interface ExtensionSettings {
   isEnabled: boolean
-  screenshotSaveLocation: string
 }
 
 export interface ExtensionState {
