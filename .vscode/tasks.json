@@ -1,0 +1,26 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "build:debug",
+      "type": "process",
+      "command": "npm",
+      "args": ["run", "build"],
+      "problemMatcher": []
+    },
+    {
+      "label": "chrome:debug",
+      "type": "process",
+      "command": "powershell.exe",
+      "args": [
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        "${workspaceFolder}/scripts/launch-chrome-debug.ps1"
+      ],
+      "dependsOn": "build:debug",
+      "problemMatcher": []
+    }
+  ]
+}
