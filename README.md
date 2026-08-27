@@ -49,6 +49,12 @@ npm run format
 4. Click "Load unpacked"
 5. Select the `dist/` folder
 
+### Launching Chrome with a Development Profile
+
+When running in VS Code in an environment with PowerShell, choose **Terminal** > **Run Task...** > `chrome:debug`
+
+This task launches chrome with a user profile isolated to this project. There, you can add this extension and log in to any streaming services you'll use for debugging. Cookies and storage will be retained between sessions, but will remain independent from any other user sessions you may have in other browser windows.
+
 ### Project Structure
 
 ```
