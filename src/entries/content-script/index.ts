@@ -218,23 +218,95 @@ function handleCaptureScreenshot(
     return;
   }
 
+  const contentBounds = getScreenshotBounds(video);
+
   try {
     const canvas = document.createElement('canvas');
     canvas.width = video.videoWidth;
     canvas.height = video.videoHeight;
     const ctx = canvas.getContext('2d');
     if (!ctx) {
-      sendResponse({ success: false, error: 'Cannot get canvas context' });
+      sendResponse({ success: false, error: 'Cannot get canvas context', contentBounds });
       return;
     }
 
     ctx.drawImage(video, 0, 0);
+    if (isBlankCanvas(ctx, canvas.width, canvas.height)) {
+      sendResponse({
+        success: false,
+        error: 'Canvas capture returned a blank image',
+        contentBounds,
+      });
+      return;
+    }
+
     const dataUrl = canvas.toDataURL('image/jpeg', 0.9);
-    sendResponse({ success: true, data: dataUrl });
+    sendResponse({ success: true, data: dataUrl, contentBounds });
   } catch (e) {
     console.error('Screenshot failed:', e);
-    sendResponse({ success: false, error: String(e) });
+    sendResponse({ success: false, error: String(e), contentBounds });
   }
+}
+
+function getScreenshotBounds(video: HTMLVideoElement) {
+  const rect = video.getBoundingClientRect();
+  const aspectRatio = video.videoWidth / video.videoHeight;
+  const objectFit = getComputedStyle(video).objectFit;
+
+  if (!aspectRatio || objectFit === 'cover' || objectFit === 'fill') {
+    return {
+      x: rect.left,
+      y: rect.top,
+      width: rect.width,
+      height: rect.height,
+      viewportWidth: window.innerWidth,
+      viewportHeight: window.innerHeight,
+    };
+  }
+
+  const displayedAspectRatio = rect.width / rect.height;
+  const width = displayedAspectRatio > aspectRatio ? rect.height * aspectRatio : rect.width;
+  const height = displayedAspectRatio > aspectRatio ? rect.height : rect.width / aspectRatio;
+
+  return {
+    x: rect.left + (rect.width - width) / 2,
+    y: rect.top + (rect.height - height) / 2,
+    width,
+    height,
+    viewportWidth: window.innerWidth,
+    viewportHeight: window.innerHeight,
+  };
+}
+
+function isBlankCanvas(ctx: CanvasRenderingContext2D, width: number, height: number) {
+  const pixels = ctx.getImageData(0, 0, width, height).data;
+  const sampleSize = Math.max(1, Math.floor(pixels.length / 4000 / 4));
+  let firstRed = 0;
+  let firstGreen = 0;
+  let firstBlue = 0;
+  let hasSample = false;
+
+  for (let pixel = 0; pixel < pixels.length; pixel += sampleSize * 4) {
+    const red = pixels[pixel];
+    const green = pixels[pixel + 1];
+    const blue = pixels[pixel + 2];
+
+    if (!hasSample) {
+      firstRed = red;
+      firstGreen = green;
+      firstBlue = blue;
+      hasSample = true;
+      continue;
+    }
+
+    const brightness = red + green + blue;
+    const firstBrightness = firstRed + firstGreen + firstBlue;
+    if (brightness > 30 || Math.abs(brightness - firstBrightness) > 12) {
+      return false;
+    }
+  }
+
+  return true;
 }
 
 // Start initialization

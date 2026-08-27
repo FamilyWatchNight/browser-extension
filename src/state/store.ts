@@ -6,7 +6,6 @@ import { isExtensionSettings } from '../shared/storage/schema'
 
 const defaultSettings: ExtensionSettings = {
   isEnabled: true,
-  screenshotSaveLocation: 'Downloads',
 }
 
 const defaultState: ExtensionState = {

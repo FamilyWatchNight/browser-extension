@@ -270,10 +270,10 @@ Popup sends CAPTURE_SCREENSHOT to the active tab
   -> content script looks up the video
   -> content script draws it to a canvas
   -> content script returns a JPEG data URL
-  -> popup currently logs the result
+  -> popup downloads the JPEG to the Downloads folder
 ```
 
-The options setting for a screenshot save location is persisted, but the current popup implementation has not yet added download/export behavior.
+Screenshots are downloaded to the browser's Downloads folder.
 
 ## Information Flow: Settings and State
 

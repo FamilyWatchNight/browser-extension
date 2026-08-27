@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 
-import type { VideoElement } from '../../shared/messages';
+import type { ScreenshotBounds, VideoElement } from '../../shared/messages';
 import { connectToServiceWorker } from '../../shared/utils/extension-api';
 import { useExtensionStore } from '../../state/store';
 
@@ -92,13 +92,50 @@ export default function PopupApp() {
         videoId,
       });
 
-      if (response.success && response.data) {
-        // In phase 2, add download/export logic
-        console.log('Screenshot captured:', response.data.substring(0, 50) + '...');
+      let screenshotData = response.success && response.data ? response.data : undefined;
+      if (!screenshotData) {
+        const visibleTabData = await chrome.tabs.captureVisibleTab(tab.windowId, {
+          format: 'jpeg',
+          quality: 90,
+        });
+        screenshotData = await cropTabCapture(visibleTabData, response.contentBounds);
       }
+      const timestamp = new Date().toISOString().replace(/[.:]/g, '-');
+
+      await chrome.downloads.download({
+        url: screenshotData,
+        filename: `screenshot-${timestamp}.jpg`,
+        conflictAction: 'uniquify',
+        saveAs: false,
+      });
     } catch (e) {
       console.error('Failed to capture screenshot:', e);
     }
+  }
+
+  async function cropTabCapture(dataUrl: string, bounds?: ScreenshotBounds) {
+    if (!bounds) return dataUrl;
+
+    const image = new Image();
+    image.src = dataUrl;
+    await image.decode();
+
+    const scaleX = image.naturalWidth / bounds.viewportWidth;
+    const scaleY = image.naturalHeight / bounds.viewportHeight;
+    const x = Math.max(0, Math.round(bounds.x * scaleX));
+    const y = Math.max(0, Math.round(bounds.y * scaleY));
+    const width = Math.min(image.naturalWidth - x, Math.round(bounds.width * scaleX));
+    const height = Math.min(image.naturalHeight - y, Math.round(bounds.height * scaleY));
+    if (width <= 0 || height <= 0) return dataUrl;
+
+    const canvas = document.createElement('canvas');
+    canvas.width = width;
+    canvas.height = height;
+    const context = canvas.getContext('2d');
+    if (!context) return dataUrl;
+
+    context.drawImage(image, x, y, width, height, 0, 0, width, height);
+    return canvas.toDataURL('image/jpeg', 0.9);
   }
 
   return (

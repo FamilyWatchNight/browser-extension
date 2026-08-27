@@ -74,9 +74,13 @@ export function createChromeFixture() {
       },
     },
     tabs: {
-      query: vi.fn().mockResolvedValue([{ id: 1, url: 'http://localhost' }]),
+      query: vi.fn().mockResolvedValue([{ id: 1, windowId: 1, url: 'http://localhost' }]),
       sendMessage: vi.fn().mockResolvedValue([]),
       executeScript: vi.fn().mockResolvedValue(undefined),
+      captureVisibleTab: vi.fn().mockResolvedValue('data:image/jpeg;base64,visible-tab'),
+    },
+    downloads: {
+      download: vi.fn().mockResolvedValue(1),
     },
   };
 
