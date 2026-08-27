@@ -34,6 +34,10 @@
     "/^npm\\.cmd run type-check$/": {
       "approve": true,
       "matchCommandLine": true
+    },
+    "/^npm\\.cmd run lint$/": {
+      "approve": true,
+      "matchCommandLine": true
     }
-  },
+  }
 }
