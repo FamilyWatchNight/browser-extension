@@ -1,94 +1,103 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useState } from 'react';
 
-import type { VideoElement } from '../../shared/messages'
-import { connectToServiceWorker } from '../../shared/utils/extension-api'
-import { useExtensionStore } from '../../state/store'
+import type { VideoElement } from '../../shared/messages';
+import { connectToServiceWorker } from '../../shared/utils/extension-api';
+import { useExtensionStore } from '../../state/store';
 
 export default function PopupApp() {
-  const { isEnabled, setEnabled } = useExtensionStore()
-  const [localVideos, setLocalVideos] = useState<VideoElement[]>([])
-  const [, setPort] = useState<chrome.runtime.Port | null>(null)
+  const { isEnabled, setEnabled } = useExtensionStore();
+  const [localVideos, setLocalVideos] = useState<VideoElement[]>([]);
+  const [, setPort] = useState<chrome.runtime.Port | null>(null);
 
   useEffect(() => {
     // Connect to service worker
-    const newPort = connectToServiceWorker('popup-port')
-    setPort(newPort)
+    const newPort = connectToServiceWorker('popup-port');
+    setPort(newPort);
 
-    newPort.postMessage({ type: 'REQUEST_STATE' })
-    newPort.onMessage.addListener(message => {
+    newPort.postMessage({ type: 'REQUEST_STATE' });
+    newPort.onMessage.addListener((message) => {
       if (message.type === 'STATE_UPDATED') {
-        setLocalVideos(message.state.videos)
+        setLocalVideos(message.state.videos);
       }
-    })
+    });
 
     // Fetch video elements from active tab
-    fetchVideoElements()
+    fetchVideoElements();
 
-    return () => newPort.disconnect()
-  }, [])
+    return () => newPort.disconnect();
+  }, []);
 
   async function fetchVideoElements() {
-    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true })
-    if (tab.id) {
+    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+    if (!tab.id) return;
+
+    for (let attempt = 0; attempt < 4; attempt += 1) {
       try {
-        const response = await chrome.tabs.sendMessage(tab.id, { type: 'GET_VIDEO_ELEMENTS' })
-        setLocalVideos(response || [])
+        const response = await chrome.tabs.sendMessage(tab.id, { type: 'GET_VIDEO_ELEMENTS' });
+        const videos = response || [];
+        setLocalVideos(videos);
+        if (videos.length > 0 || attempt === 3) return;
       } catch (e) {
-        console.error('Failed to fetch videos:', e)
+        if (attempt === 3) {
+          console.error('Failed to fetch videos:', e);
+          return;
+        }
       }
+
+      await new Promise((resolve) => setTimeout(resolve, 250));
     }
   }
 
   async function controlVideo(action: 'play' | 'pause' | 'skip') {
-    if (localVideos.length === 0) return
+    if (localVideos.length === 0) return;
 
-    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true })
-    if (!tab.id) return
+    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+    if (!tab.id) return;
 
-    const videoId = localVideos[0].id
+    const videoId = localVideos[0].id;
 
     try {
       if (action === 'play') {
-        await chrome.tabs.sendMessage(tab.id, { type: 'PLAY_VIDEO', videoId })
+        await chrome.tabs.sendMessage(tab.id, { type: 'PLAY_VIDEO', videoId });
       } else if (action === 'pause') {
-        await chrome.tabs.sendMessage(tab.id, { type: 'PAUSE_VIDEO', videoId })
+        await chrome.tabs.sendMessage(tab.id, { type: 'PAUSE_VIDEO', videoId });
       } else if (action === 'skip') {
-        const currentTime = localVideos[0].currentTime + 10
+        const currentTime = localVideos[0].currentTime + 10;
         await chrome.tabs.sendMessage(tab.id, {
           type: 'MOVE_PLAYHEAD',
           videoId,
           seekTime: currentTime,
-        })
+        });
       }
 
       // Refresh video state
-      await new Promise(r => setTimeout(r, 500))
-      fetchVideoElements()
+      await new Promise((r) => setTimeout(r, 500));
+      fetchVideoElements();
     } catch (e) {
-      console.error(`Failed to ${action} video:`, e)
+      console.error(`Failed to ${action} video:`, e);
     }
   }
 
   async function captureScreenshot() {
-    if (localVideos.length === 0) return
+    if (localVideos.length === 0) return;
 
-    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true })
-    if (!tab.id) return
+    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+    if (!tab.id) return;
 
-    const videoId = localVideos[0].id
+    const videoId = localVideos[0].id;
 
     try {
       const response = await chrome.tabs.sendMessage(tab.id, {
         type: 'CAPTURE_SCREENSHOT',
         videoId,
-      })
+      });
 
       if (response.success && response.data) {
         // In phase 2, add download/export logic
-        console.log('Screenshot captured:', response.data.substring(0, 50) + '...')
+        console.log('Screenshot captured:', response.data.substring(0, 50) + '...');
       }
     } catch (e) {
-      console.error('Failed to capture screenshot:', e)
+      console.error('Failed to capture screenshot:', e);
     }
   }
 
@@ -101,7 +110,7 @@ export default function PopupApp() {
           <input
             type="checkbox"
             checked={isEnabled}
-            onChange={e => setEnabled(e.target.checked)}
+            onChange={(e) => setEnabled(e.target.checked)}
           />
           {' Enable'}
         </label>
@@ -140,5 +149,5 @@ export default function PopupApp() {
         </div>
       )}
     </div>
-  )
+  );
 }

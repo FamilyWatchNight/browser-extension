@@ -28,7 +28,7 @@
         "src/entries/content-script/index.ts"
       ],
       "run_at": "document_end",
-      "all_frames": true
+      "all_frames": false
     }
   ],
   "icons": {
