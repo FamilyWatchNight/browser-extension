@@ -8,6 +8,9 @@ export default function PopupApp() {
   const { isEnabled, setEnabled } = useExtensionStore();
   const [localVideos, setLocalVideos] = useState<VideoElement[]>([]);
   const [selectedVideoId, setSelectedVideoId] = useState<string | undefined>();
+  const [audioCaptureActive, setAudioCaptureActive] = useState(false);
+  const [audioCaptureMode, setAudioCaptureMode] = useState<'video' | 'tab' | undefined>();
+  const [audioCaptureError, setAudioCaptureError] = useState<string | undefined>();
   const [, setPort] = useState<chrome.runtime.Port | null>(null);
 
   const updateVideos = useCallback((videos: VideoElement[]) => {
@@ -132,6 +135,75 @@ export default function PopupApp() {
     }
   }
 
+  async function toggleAudioCapture() {
+    const selectedVideo = localVideos.find((video) => video.id === selectedVideoId);
+    if (!audioCaptureActive && !selectedVideo) return;
+
+    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+    if (!tab.id) return;
+
+    try {
+      if (!audioCaptureActive) {
+        const response = await chrome.tabs.sendMessage(tab.id, {
+          type: 'START_AUDIO_CAPTURE',
+          videoId: selectedVideo!.id,
+        });
+        if (!response.success) {
+          setAudioCaptureError(response.error || 'Unable to start audio capture');
+          return;
+        }
+        setAudioCaptureError(undefined);
+        setAudioCaptureActive(true);
+        setAudioCaptureMode('video');
+        return;
+      }
+
+      const response =
+        audioCaptureMode === 'tab'
+          ? await chrome.runtime.sendMessage({ type: 'STOP_TAB_AUDIO_CAPTURE' })
+          : await chrome.tabs.sendMessage(tab.id, { type: 'STOP_AUDIO_CAPTURE' });
+      setAudioCaptureActive(false);
+      setAudioCaptureMode(undefined);
+      if (!response?.success || !response.data) {
+        setAudioCaptureError(response?.error || 'Unable to finish audio capture');
+        return;
+      }
+
+      const timestamp = new Date().toISOString().replace(/[.:]/g, '-');
+      const extension = response.mimeType?.includes('ogg') ? 'ogg' : 'webm';
+      await chrome.downloads.download({
+        url: response.data,
+        filename: `family-watch-night-audio-${timestamp}.${extension}`,
+        conflictAction: 'uniquify',
+        saveAs: false,
+      });
+      setAudioCaptureError(undefined);
+    } catch (error) {
+      setAudioCaptureError(error instanceof Error ? error.message : String(error));
+    }
+  }
+
+  async function captureWholeTabAudio() {
+    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+    if (!tab.id) return;
+
+    try {
+      const response = await chrome.runtime.sendMessage({
+        type: 'START_TAB_AUDIO_CAPTURE',
+        tabId: tab.id,
+      });
+      if (!response?.success) {
+        setAudioCaptureError(response?.error || 'Unable to start whole-tab capture');
+        return;
+      }
+      setAudioCaptureError(undefined);
+      setAudioCaptureActive(true);
+      setAudioCaptureMode('tab');
+    } catch (error) {
+      setAudioCaptureError(error instanceof Error ? error.message : String(error));
+    }
+  }
+
   async function cropTabCapture(dataUrl: string, bounds?: ScreenshotBounds) {
     if (!bounds) return dataUrl;
 
@@ -226,7 +298,30 @@ export default function PopupApp() {
             <button onClick={captureScreenshot} style={{ padding: '8px' }}>
               📸 Screenshot
             </button>
+            <button onClick={toggleAudioCapture} style={{ padding: '8px' }}>
+              {audioCaptureActive ? '⏹ Stop audio' : '🎙 Record audio'}
+            </button>
           </div>
+
+          {audioCaptureActive && (
+            <div role="status" style={{ marginTop: '12px', fontSize: '12px' }}>
+              {audioCaptureMode === 'tab'
+                ? 'Recording all audio from this tab...'
+                : 'Recording audio from the selected video...'}
+            </div>
+          )}
+          {audioCaptureError && (
+            <>
+              <div role="alert" style={{ marginTop: '12px', fontSize: '12px', color: '#b91c1c' }}>
+                {audioCaptureError}
+              </div>
+              {!audioCaptureActive && (
+                <button onClick={captureWholeTabAudio} style={{ marginTop: '8px', padding: '8px' }}>
+                  Record whole tab instead
+                </button>
+              )}
+            </>
+          )}
 
           <div style={{ marginTop: '12px', fontSize: '12px' }}>
             <p>
