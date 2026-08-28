@@ -1,5 +1,6 @@
 import type {
   ActionResponse,
+  AudioCaptureResponse,
   ContentScriptMessage,
   ScreenshotResponse,
   VideoElement,
@@ -13,6 +14,13 @@ const documentObservers: Map<Document, MutationObserver> = new Map();
 const iframeLoadHandlers: Map<HTMLIFrameElement, () => void> = new Map();
 let refreshTimer: ReturnType<typeof setTimeout> | undefined;
 let metadataTimer: ReturnType<typeof setTimeout> | undefined;
+let activeAudioRecorder: MediaRecorder | undefined;
+let activeAudioStream: MediaStream | undefined;
+let audioChunks: Blob[] = [];
+
+type CapturableVideo = HTMLVideoElement & {
+  captureStream?: () => MediaStream;
+};
 
 function getVideoSnapshots(): VideoElement[] {
   return Array.from(detectedVideos.entries())
@@ -171,6 +179,14 @@ function registerMessageListener() {
         handleCaptureScreenshot(message.videoId, sendResponse);
         return true;
 
+      case 'START_AUDIO_CAPTURE':
+        handleStartAudioCapture(message.videoId, sendResponse);
+        return true;
+
+      case 'STOP_AUDIO_CAPTURE':
+        handleStopAudioCapture(sendResponse);
+        return true;
+
       default:
         sendResponse({ success: false, error: 'Unknown message type' });
     }
@@ -261,6 +277,107 @@ function handleCaptureScreenshot(
     console.error('Screenshot failed:', e);
     sendResponse({ success: false, error: String(e), contentBounds });
   }
+}
+
+function handleStartAudioCapture(
+  videoId: string,
+  sendResponse: (data: AudioCaptureResponse) => void,
+) {
+  if (activeAudioRecorder) {
+    sendResponse({ success: false, error: 'Audio capture is already active' });
+    return;
+  }
+
+  const video = detectedVideos.get(videoId);
+  if (!video) {
+    sendResponse({ success: false, error: 'Video not found' });
+    return;
+  }
+
+  const capturableVideo = video as CapturableVideo;
+  if (!capturableVideo.captureStream) {
+    sendResponse({ success: false, error: 'This browser cannot capture media element audio' });
+    return;
+  }
+
+  try {
+    const capturedStream = capturableVideo.captureStream();
+    const audioTracks = capturedStream.getAudioTracks();
+    if (audioTracks.length === 0) {
+      sendResponse({ success: false, error: 'The selected video has no capturable audio track' });
+      return;
+    }
+
+    const stream = new MediaStream(audioTracks);
+
+    const mimeType = getAudioRecordingMimeType();
+    if (!mimeType) {
+      sendResponse({ success: false, error: 'This browser cannot encode an audio recording' });
+      return;
+    }
+
+    audioChunks = [];
+    const recorder = new MediaRecorder(stream, { mimeType });
+    recorder.addEventListener('dataavailable', (event) => {
+      if (event.data.size > 0) audioChunks.push(event.data);
+    });
+    recorder.addEventListener('error', () => {
+      stream.getTracks().forEach((track) => track.stop());
+      activeAudioRecorder = undefined;
+      activeAudioStream = undefined;
+      audioChunks = [];
+    });
+    activeAudioRecorder = recorder;
+    activeAudioStream = stream;
+    recorder.start();
+    sendResponse({ success: true, mimeType });
+  } catch (error) {
+    activeAudioRecorder = undefined;
+    activeAudioStream = undefined;
+    audioChunks = [];
+    sendResponse({ success: false, error: formatAudioCaptureError(error) });
+  }
+}
+
+function handleStopAudioCapture(sendResponse: (data: AudioCaptureResponse) => void) {
+  const recorder = activeAudioRecorder;
+  const stream = activeAudioStream;
+  if (!recorder || !stream) {
+    sendResponse({ success: false, error: 'Audio capture is not active' });
+    return;
+  }
+
+  recorder.addEventListener('stop', () => {
+    const blob = new Blob(audioChunks, { type: recorder.mimeType });
+    const reader = new FileReader();
+    reader.addEventListener('loadend', () => {
+      stream.getTracks().forEach((track) => track.stop());
+      activeAudioRecorder = undefined;
+      activeAudioStream = undefined;
+      audioChunks = [];
+      sendResponse({ success: true, data: String(reader.result), mimeType: recorder.mimeType });
+    });
+    reader.readAsDataURL(blob);
+  });
+  recorder.stop();
+}
+
+function getAudioRecordingMimeType() {
+  const candidates = ['audio/webm;codecs=opus', 'audio/webm', 'audio/ogg;codecs=opus'];
+  return candidates.find((candidate) => MediaRecorder.isTypeSupported(candidate));
+}
+
+function formatAudioCaptureError(error: unknown) {
+  if (error instanceof DOMException && error.name === 'SecurityError') {
+    return `The selected media is protected or cannot be captured (${error.name}: ${error.message})`;
+  }
+  if (error instanceof DOMException) {
+    return `MediaRecorder failed (${error.name}${error.code ? `, code ${error.code}` : ''}): ${error.message}`;
+  }
+  if (error instanceof Error) {
+    return `${error.name}: ${error.message}`;
+  }
+  return String(error);
 }
 
 function getScreenshotBounds(video: HTMLVideoElement) {

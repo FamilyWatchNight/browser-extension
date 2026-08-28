@@ -2,6 +2,7 @@ import type {
   ActionResponse,
   BackgroundMessage,
   ContentScriptMessage,
+  AudioCaptureResponse,
   ExtensionSettings,
   ExtensionState,
   PopupMessage,
@@ -16,11 +17,23 @@ console.log('[Service Worker] Starting...');
 useExtensionStore.getState().loadFromStorage();
 
 const popupPorts = new Set<chrome.runtime.Port>();
+let pendingTabCaptureStart: ((response: AudioCaptureResponse) => void) | undefined;
+let pendingTabCaptureStop: ((response: AudioCaptureResponse) => void) | undefined;
+
+type OffscreenMessage =
+  | { target: 'background'; type: 'TAB_AUDIO_CAPTURE_STARTED'; mimeType: string }
+  | { target: 'background'; type: 'TAB_AUDIO_CAPTURE_ERROR'; error: string }
+  | { target: 'background'; type: 'TAB_AUDIO_CAPTURE_COMPLETE'; data: string; mimeType: string };
 
 // Listen for messages from content script and popup
 chrome.runtime.onMessage.addListener(
-  (message: ContentScriptMessage | PopupMessage, sender, sendResponse) => {
+  (message: ContentScriptMessage | PopupMessage | OffscreenMessage, sender, sendResponse) => {
     console.log('[Service Worker] Received message:', message.type, 'from', sender.url);
+
+    if ('target' in message && message.target === 'background') {
+      handleOffscreenMessage(message);
+      return false;
+    }
 
     switch (message.type) {
       case 'GET_VIDEO_ELEMENTS':
@@ -34,6 +47,20 @@ chrome.runtime.onMessage.addListener(
 
       case 'REQUEST_STATE':
         handleRequestState(sendResponse);
+        return true;
+
+      case 'START_TAB_AUDIO_CAPTURE':
+        handleStartTabAudioCapture(message.tabId, sendResponse);
+        return true;
+
+      case 'STOP_TAB_AUDIO_CAPTURE':
+        pendingTabCaptureStop = sendResponse;
+        chrome.runtime
+          .sendMessage({ target: 'offscreen', type: 'STOP_TAB_AUDIO_CAPTURE' })
+          .catch((error) => {
+            pendingTabCaptureStop?.({ success: false, error: formatTabCaptureError(error) });
+            pendingTabCaptureStop = undefined;
+          });
         return true;
 
       case 'VIDEO_STATE_UPDATE':
@@ -114,4 +141,66 @@ function handleRequestState(sendResponse: (data: BackgroundMessage | ExtensionSt
     type: 'STATE_UPDATED',
     state: useExtensionStore.getState(),
   });
+}
+
+async function handleStartTabAudioCapture(
+  tabId: number,
+  sendResponse: (data: AudioCaptureResponse) => void,
+) {
+  try {
+    await ensureOffscreenDocument();
+    const streamId = await chrome.tabCapture.getMediaStreamId({ targetTabId: tabId });
+    pendingTabCaptureStart = sendResponse;
+    await chrome.runtime
+      .sendMessage({
+        target: 'offscreen',
+        type: 'START_TAB_AUDIO_CAPTURE',
+        streamId,
+      })
+      .catch((error) => {
+        pendingTabCaptureStart?.({ success: false, error: formatTabCaptureError(error) });
+        pendingTabCaptureStart = undefined;
+      });
+  } catch (error) {
+    const formattedError = formatTabCaptureError(error);
+    console.error('[Service Worker] Whole-tab capture failed:', formattedError);
+    sendResponse({ success: false, error: formattedError });
+  }
+}
+
+function handleOffscreenMessage(message: OffscreenMessage) {
+  if (message.type === 'TAB_AUDIO_CAPTURE_STARTED') {
+    pendingTabCaptureStart?.({ success: true, mimeType: message.mimeType });
+    pendingTabCaptureStart = undefined;
+  } else if (message.type === 'TAB_AUDIO_CAPTURE_ERROR') {
+    pendingTabCaptureStart?.({ success: false, error: message.error });
+    pendingTabCaptureStart = undefined;
+    pendingTabCaptureStop?.({ success: false, error: message.error });
+    pendingTabCaptureStop = undefined;
+  } else if (message.type === 'TAB_AUDIO_CAPTURE_COMPLETE') {
+    pendingTabCaptureStop?.({ success: true, data: message.data, mimeType: message.mimeType });
+    pendingTabCaptureStop = undefined;
+  }
+}
+
+async function ensureOffscreenDocument() {
+  const contexts = await chrome.runtime.getContexts({
+    contextTypes: ['OFFSCREEN_DOCUMENT'],
+  });
+  if (
+    contexts.some((context) => context.documentUrl?.endsWith('src/entries/offscreen/index.html'))
+  ) {
+    return;
+  }
+
+  await chrome.offscreen.createDocument({
+    url: 'src/entries/offscreen/index.html',
+    reasons: ['USER_MEDIA'],
+    justification: 'Record audio from the active tab when media element capture is unavailable',
+  });
+}
+
+function formatTabCaptureError(error: unknown) {
+  if (error instanceof Error) return `${error.name}: ${error.message}`;
+  return String(error);
 }

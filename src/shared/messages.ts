@@ -5,11 +5,16 @@ export type ContentScriptMessage =
   | { type: 'PAUSE_VIDEO'; videoId: string }
   | { type: 'MOVE_PLAYHEAD'; videoId: string; seekTime: number }
   | { type: 'CAPTURE_SCREENSHOT'; videoId: string }
+  | { type: 'START_AUDIO_CAPTURE'; videoId: string }
+  | { type: 'STOP_AUDIO_CAPTURE' }
   | { type: 'VIDEO_STATE_UPDATE'; videos: VideoElement[] };
 
 // Message types sent from popup/options to background
 export type PopupMessage =
-  { type: 'UPDATE_SETTINGS'; settings: ExtensionSettings } | { type: 'REQUEST_STATE' };
+  | { type: 'UPDATE_SETTINGS'; settings: ExtensionSettings }
+  | { type: 'REQUEST_STATE' }
+  | { type: 'START_TAB_AUDIO_CAPTURE'; tabId: number }
+  | { type: 'STOP_TAB_AUDIO_CAPTURE' };
 
 // Message types sent from background to popup/content script
 export type BackgroundMessage =
@@ -48,6 +53,11 @@ export interface ScreenshotResponse extends ActionResponse {
   contentBounds?: ScreenshotBounds;
 }
 
+export interface AudioCaptureResponse extends ActionResponse {
+  data?: string;
+  mimeType?: string;
+}
+
 export interface ScreenshotBounds {
   x: number;
   y: number;
@@ -81,4 +91,8 @@ export type MessageResponse<T extends ContentScriptMessage | PopupMessage> = T e
         ? { success: boolean }
         : T extends { type: 'CAPTURE_SCREENSHOT' }
           ? { success: boolean; data?: string }
-          : never;
+          : T extends { type: 'START_AUDIO_CAPTURE' | 'STOP_AUDIO_CAPTURE' }
+            ? AudioCaptureResponse
+            : T extends { type: 'START_TAB_AUDIO_CAPTURE' | 'STOP_TAB_AUDIO_CAPTURE' }
+              ? AudioCaptureResponse
+              : never;
