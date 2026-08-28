@@ -5,71 +5,80 @@ export type ContentScriptMessage =
   | { type: 'PAUSE_VIDEO'; videoId: string }
   | { type: 'MOVE_PLAYHEAD'; videoId: string; seekTime: number }
   | { type: 'CAPTURE_SCREENSHOT'; videoId: string }
-  | { type: 'VIDEO_STATE_UPDATE'; videos: VideoElement[] }
+  | { type: 'VIDEO_STATE_UPDATE'; videos: VideoElement[] };
 
 // Message types sent from popup/options to background
 export type PopupMessage =
-  | { type: 'UPDATE_SETTINGS'; settings: ExtensionSettings }
-  | { type: 'REQUEST_STATE' }
+  { type: 'UPDATE_SETTINGS'; settings: ExtensionSettings } | { type: 'REQUEST_STATE' };
 
 // Message types sent from background to popup/content script
 export type BackgroundMessage =
   | { type: 'STATE_UPDATED'; state: ExtensionState }
-  | { type: 'SETTINGS_CHANGED'; settings: ExtensionSettings }
+  | { type: 'SETTINGS_CHANGED'; settings: ExtensionSettings };
 
 // Types for video elements detected
 export interface VideoElement {
-  id: string // Unique identifier
-  src: string // Video source URL
-  title: string // Page title or video title
-  duration: number // Duration in seconds
-  currentTime: number // Current playback position
-  paused: boolean // Is playback paused
-  frameIndex: number // Which frame (0 = main, 1+ = iframe)
+  id: string; // Unique identifier
+  src: string; // Video source URL
+  title: string; // Page title or video title
+  duration: number; // Duration in seconds
+  currentTime: number; // Current playback position
+  paused: boolean; // Is playback paused
+  frameIndex: number; // Which frame (0 = main, 1+ = iframe)
+  width: number; // Rendered width in CSS pixels
+  height: number; // Rendered height in CSS pixels
+  isVisible: boolean; // Whether the element is rendered and visible
+  hasSource: boolean; // Whether the element has a media source
+  readyState: number; // HTMLMediaElement ready state
 }
 
 export interface VideoPlaybackUpdate {
-  currentTime: number
-  paused: boolean
-  duration: number
+  currentTime: number;
+  paused: boolean;
+  duration: number;
 }
 
 export interface ActionResponse {
-  success: boolean
-  error?: string
+  success: boolean;
+  error?: string;
 }
 
 export interface ScreenshotResponse extends ActionResponse {
-  data?: string
-  contentBounds?: ScreenshotBounds
+  data?: string;
+  contentBounds?: ScreenshotBounds;
 }
 
 export interface ScreenshotBounds {
-  x: number
-  y: number
-  width: number
-  height: number
-  viewportWidth: number
-  viewportHeight: number
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  viewportWidth: number;
+  viewportHeight: number;
 }
 
 export interface ExtensionSettings {
-  isEnabled: boolean
+  isEnabled: boolean;
 }
 
 export interface ExtensionState {
-  isEnabled: boolean
-  videos: VideoElement[]
-  playbackState: Record<string, { position: number; isPlaying: boolean }>
-  settings: ExtensionSettings
+  isEnabled: boolean;
+  videos: VideoElement[];
+  playbackState: Record<string, { position: number; isPlaying: boolean }>;
+  settings: ExtensionSettings;
 }
 
 // Type helpers for responses
-export type MessageResponse<T extends ContentScriptMessage | PopupMessage> =
-  T extends { type: 'GET_VIDEO_ELEMENTS' } ? VideoElement[] :
-  T extends { type: 'REQUEST_STATE' } ? ExtensionState :
-  T extends { type: 'UPDATE_SETTINGS' } ? { success: boolean } :
-  T extends { type: 'PLAY_VIDEO' | 'PAUSE_VIDEO' | 'MOVE_PLAYHEAD' } ? { success: boolean } :
-  T extends { type: 'CAPTURE_SCREENSHOT' } ? { success: boolean; data?: string } :
-  never
-
+export type MessageResponse<T extends ContentScriptMessage | PopupMessage> = T extends {
+  type: 'GET_VIDEO_ELEMENTS';
+}
+  ? VideoElement[]
+  : T extends { type: 'REQUEST_STATE' }
+    ? ExtensionState
+    : T extends { type: 'UPDATE_SETTINGS' }
+      ? { success: boolean }
+      : T extends { type: 'PLAY_VIDEO' | 'PAUSE_VIDEO' | 'MOVE_PLAYHEAD' }
+        ? { success: boolean }
+        : T extends { type: 'CAPTURE_SCREENSHOT' }
+          ? { success: boolean; data?: string }
+          : never;

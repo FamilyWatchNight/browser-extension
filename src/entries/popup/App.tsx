@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 
 import type { ScreenshotBounds, VideoElement } from '../../shared/messages';
 import { connectToServiceWorker } from '../../shared/utils/extension-api';
@@ -7,27 +7,28 @@ import { useExtensionStore } from '../../state/store';
 export default function PopupApp() {
   const { isEnabled, setEnabled } = useExtensionStore();
   const [localVideos, setLocalVideos] = useState<VideoElement[]>([]);
+  const [selectedVideoId, setSelectedVideoId] = useState<string | undefined>();
   const [, setPort] = useState<chrome.runtime.Port | null>(null);
 
-  useEffect(() => {
-    // Connect to service worker
-    const newPort = connectToServiceWorker('popup-port');
-    setPort(newPort);
-
-    newPort.postMessage({ type: 'REQUEST_STATE' });
-    newPort.onMessage.addListener((message) => {
-      if (message.type === 'STATE_UPDATED') {
-        setLocalVideos(message.state.videos);
-      }
-    });
-
-    // Fetch video elements from active tab
-    fetchVideoElements();
-
-    return () => newPort.disconnect();
+  const updateVideos = useCallback((videos: VideoElement[]) => {
+    setLocalVideos(videos.map(normalizeVideo));
+    setSelectedVideoId((currentId) =>
+      currentId && videos.some((video) => video.id === currentId) ? currentId : videos[0]?.id,
+    );
   }, []);
 
-  async function fetchVideoElements() {
+  function normalizeVideo(video: VideoElement): VideoElement {
+    return {
+      ...video,
+      width: Number.isFinite(video.width) ? video.width : 0,
+      height: Number.isFinite(video.height) ? video.height : 0,
+      isVisible: video.isVisible ?? false,
+      hasSource: video.hasSource ?? Boolean(video.src),
+      readyState: Number.isFinite(video.readyState) ? video.readyState : 0,
+    };
+  }
+
+  const fetchVideoElements = useCallback(async () => {
     const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
     if (!tab.id) return;
 
@@ -35,7 +36,7 @@ export default function PopupApp() {
       try {
         const response = await chrome.tabs.sendMessage(tab.id, { type: 'GET_VIDEO_ELEMENTS' });
         const videos = response || [];
-        setLocalVideos(videos);
+        updateVideos(videos);
         if (videos.length > 0 || attempt === 3) return;
       } catch (e) {
         if (attempt === 3) {
@@ -46,15 +47,32 @@ export default function PopupApp() {
 
       await new Promise((resolve) => setTimeout(resolve, 250));
     }
-  }
+  }, [updateVideos]);
+
+  useEffect(() => {
+    const newPort = connectToServiceWorker('popup-port');
+    setPort(newPort);
+
+    newPort.postMessage({ type: 'REQUEST_STATE' });
+    newPort.onMessage.addListener((message) => {
+      if (message.type === 'STATE_UPDATED') {
+        updateVideos(message.state.videos);
+      }
+    });
+
+    fetchVideoElements();
+
+    return () => newPort.disconnect();
+  }, [fetchVideoElements, updateVideos]);
 
   async function controlVideo(action: 'play' | 'pause' | 'skip') {
-    if (localVideos.length === 0) return;
+    const selectedVideo = localVideos.find((video) => video.id === selectedVideoId);
+    if (!selectedVideo) return;
 
     const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
     if (!tab.id) return;
 
-    const videoId = localVideos[0].id;
+    const videoId = selectedVideo.id;
 
     try {
       if (action === 'play') {
@@ -62,7 +80,7 @@ export default function PopupApp() {
       } else if (action === 'pause') {
         await chrome.tabs.sendMessage(tab.id, { type: 'PAUSE_VIDEO', videoId });
       } else if (action === 'skip') {
-        const currentTime = localVideos[0].currentTime + 10;
+        const currentTime = selectedVideo.currentTime + 10;
         await chrome.tabs.sendMessage(tab.id, {
           type: 'MOVE_PLAYHEAD',
           videoId,
@@ -79,12 +97,13 @@ export default function PopupApp() {
   }
 
   async function captureScreenshot() {
-    if (localVideos.length === 0) return;
+    const selectedVideo = localVideos.find((video) => video.id === selectedVideoId);
+    if (!selectedVideo) return;
 
     const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
     if (!tab.id) return;
 
-    const videoId = localVideos[0].id;
+    const videoId = selectedVideo.id;
 
     try {
       const response = await chrome.tabs.sendMessage(tab.id, {
@@ -158,6 +177,41 @@ export default function PopupApp() {
           <div style={{ marginBottom: '12px', fontSize: '12px', color: '#666' }}>
             Found {localVideos.length} video(s)
           </div>
+
+          {localVideos.length > 1 && (
+            <div role="radiogroup" aria-label="Detected videos" style={{ marginBottom: '12px' }}>
+              {localVideos.map((video, index) => {
+                const isSelected = video.id === selectedVideoId;
+                const sourceStatus = video.hasSource ? 'source' : 'no source';
+                const playbackStatus = video.paused ? 'paused' : 'playing';
+
+                return (
+                  <button
+                    key={video.id}
+                    role="radio"
+                    aria-checked={isSelected}
+                    onClick={() => setSelectedVideoId(video.id)}
+                    style={{
+                      display: 'block',
+                      width: '100%',
+                      marginBottom: '6px',
+                      padding: '8px',
+                      textAlign: 'left',
+                      border: isSelected ? '2px solid #2563eb' : '1px solid #ccc',
+                      backgroundColor: isSelected ? '#eff6ff' : '#fff',
+                      borderRadius: '4px',
+                    }}
+                  >
+                    <strong>Video {index + 1}</strong>
+                    <span style={{ display: 'block', fontSize: '11px', color: '#666' }}>
+                      {Math.round(video.width)} x {Math.round(video.height)} px | {sourceStatus} |{' '}
+                      {video.isVisible ? 'visible' : 'hidden'} | {playbackStatus}
+                    </span>
+                  </button>
+                );
+              })}
+            </div>
+          )}
 
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '8px' }}>
             <button onClick={() => controlVideo('play')} style={{ padding: '8px' }}>
