@@ -143,4 +143,50 @@ describe('content-script lifecycle', () => {
       ],
     });
   });
+
+  it('ranks a visible sourced video ahead of an empty video and controls the selected id', async () => {
+    const emptyVideo = document.createElement('video');
+    const movieVideo = document.createElement('video');
+    movieVideo.src = 'movie.mp4';
+    vi.spyOn(emptyVideo, 'getBoundingClientRect').mockReturnValue({
+      width: 0,
+      height: 0,
+    } as DOMRect);
+    vi.spyOn(movieVideo, 'getBoundingClientRect').mockReturnValue({
+      width: 1280,
+      height: 720,
+    } as DOMRect);
+    Object.defineProperty(movieVideo, 'readyState', { configurable: true, value: 4 });
+    const play = vi.spyOn(movieVideo, 'play').mockResolvedValue(undefined);
+    const emptyPlay = vi.spyOn(emptyVideo, 'play').mockResolvedValue(undefined);
+    document.body.append(emptyVideo, movieVideo);
+
+    await import('../../entries/content-script/index');
+
+    const sendResponse = vi.fn();
+    chromeFixture.messageListeners[0]({ type: 'GET_VIDEO_ELEMENTS' }, {}, sendResponse);
+    const videos = sendResponse.mock.calls[0][0];
+
+    expect(videos).toHaveLength(2);
+    expect(videos[0]).toEqual(
+      expect.objectContaining({
+        src: 'http://localhost:3000/movie.mp4',
+        width: 1280,
+        height: 720,
+        hasSource: true,
+        isVisible: true,
+      }),
+    );
+
+    const playResponse = vi.fn();
+    chromeFixture.messageListeners[0](
+      { type: 'PLAY_VIDEO', videoId: videos[0].id },
+      {},
+      playResponse,
+    );
+
+    expect(play).toHaveBeenCalledOnce();
+    expect(emptyPlay).not.toHaveBeenCalled();
+    expect(playResponse).toHaveBeenCalledWith({ success: true });
+  });
 });

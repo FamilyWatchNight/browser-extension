@@ -15,15 +15,30 @@ let refreshTimer: ReturnType<typeof setTimeout> | undefined;
 let metadataTimer: ReturnType<typeof setTimeout> | undefined;
 
 function getVideoSnapshots(): VideoElement[] {
-  return Array.from(detectedVideos.entries()).map(([id, video]) => ({
-    id,
-    src: video.src || video.currentSrc,
-    title: video.title || document.title || 'Unknown Video',
-    duration: video.duration || 0,
-    currentTime: video.currentTime || 0,
-    paused: video.paused,
-    frameIndex: 0,
-  }));
+  return Array.from(detectedVideos.entries())
+    .map(([id, video], discoveryIndex) => ({
+      video: {
+        ...createVideoElementSnapshot(video, 0),
+        id,
+      },
+      discoveryIndex,
+    }))
+    .sort((left, right) => {
+      const leftScore = getVideoPriority(left.video);
+      const rightScore = getVideoPriority(right.video);
+      return rightScore - leftScore || left.discoveryIndex - right.discoveryIndex;
+    })
+    .map((entry) => entry.video);
+}
+
+function getVideoPriority(video: VideoElement): number {
+  const area = video.width * video.height;
+  const mediaPriority = video.hasSource ? 1_000_000_000 : 0;
+  const readyPriority = video.readyState > 0 ? 100_000_000 : 0;
+  const visibilityPriority = video.isVisible ? 10_000_000 : 0;
+  const playingPriority = !video.paused ? 1_000_000 : 0;
+
+  return mediaPriority + readyPriority + visibilityPriority + playingPriority + area;
 }
 
 function scheduleMetadataUpdate() {

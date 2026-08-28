@@ -180,22 +180,59 @@ describe('popup video discovery', () => {
       format: 'jpeg',
       quality: 90,
     });
-    expect(drawImage).toHaveBeenCalledWith(
-      expect.anything(),
-      200,
-      0,
-      1200,
-      900,
-      0,
-      0,
-      1200,
-      900,
-    );
+    expect(drawImage).toHaveBeenCalledWith(expect.anything(), 200, 0, 1200, 900, 0, 0, 1200, 900);
     expect(chromeFixture.chrome.downloads.download).toHaveBeenCalledWith({
       url: 'data:image/jpeg;base64,cropped-tab',
       filename: expect.stringMatching(/^screenshot-.*\.jpg$/),
       conflictAction: 'uniquify',
       saveAs: false,
+    });
+  });
+
+  it('controls the explicitly selected video', async () => {
+    const firstVideo = {
+      id: 'video-1',
+      src: 'small.mp4',
+      title: 'Small',
+      duration: 10,
+      currentTime: 3,
+      paused: true,
+      frameIndex: 0,
+      width: 320,
+      height: 180,
+      isVisible: true,
+      hasSource: true,
+      readyState: 4,
+    };
+    const secondVideo = {
+      ...firstVideo,
+      id: 'video-2',
+      src: 'movie.mp4',
+      title: 'Movie',
+      currentTime: 27,
+      width: 1280,
+      height: 720,
+    };
+    chromeFixture.chrome.tabs.sendMessage = vi
+      .fn()
+      .mockResolvedValueOnce([firstVideo, secondVideo]);
+
+    render(<PopupApp />);
+
+    await act(async () => {
+      await Promise.resolve();
+    });
+    fireEvent.click(screen.getByRole('radio', { name: /Video 2/ }));
+    fireEvent.click(screen.getByRole('button', { name: /Skip/ }));
+
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    expect(chromeFixture.chrome.tabs.sendMessage).toHaveBeenCalledWith(1, {
+      type: 'MOVE_PLAYHEAD',
+      videoId: 'video-2',
+      seekTime: 37,
     });
   });
 });

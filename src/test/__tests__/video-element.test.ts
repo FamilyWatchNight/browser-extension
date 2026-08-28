@@ -55,6 +55,24 @@ describe('video-element', () => {
     expect(snapshot.currentTime).toBe(0);
   });
 
+  it('sanitizes invalid dimensions and recognizes a MediaSource', () => {
+    const video = document.createElement('video');
+    Object.defineProperty(video, 'srcObject', { configurable: true, value: {} });
+    vi.spyOn(video, 'getBoundingClientRect').mockReturnValue({
+      width: Number.NaN,
+      height: Number.POSITIVE_INFINITY,
+    } as DOMRect);
+
+    const snapshot = createVideoElementSnapshot(video);
+
+    expect(snapshot).toMatchObject({
+      width: 0,
+      height: 0,
+      isVisible: false,
+      hasSource: true,
+    });
+  });
+
   it('reports current media state for supported events', () => {
     const video = document.createElement('video');
     setMediaState(video, { duration: 10, currentTime: 1, paused: true });
