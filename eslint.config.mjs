@@ -11,7 +11,6 @@ import js from '@eslint/js';
 import prettier from 'eslint-config-prettier';
 import importPlugin from 'eslint-plugin-import-x';
 import reactHooksPlugin from 'eslint-plugin-react-hooks';
-import globals from 'globals';
 import tseslint from 'typescript-eslint';
 
 export default [
@@ -29,12 +28,6 @@ export default [
   // Special handling for config files
   {
     files: ['**/*.{js,cjs,mjs}'],
-
-    languageOptions: {
-      globals: {
-        ...globals.node,
-      },
-    },
 
     rules: {
       // Allow CommonJS require() in config files and scripts
