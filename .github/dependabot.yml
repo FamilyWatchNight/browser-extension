@@ -17,3 +17,7 @@ updates:
         patterns:
           - 'eslint'
           - '@eslint/js'
+      vitest-ecosystem:
+        patterns:
+          - 'vitest'
+          - '@vitest/ui'
