@@ -16,6 +16,12 @@ updates:
       eslint-ecosystem:
         patterns:
           - 'eslint'
+          - 'eslint-config-prettier'
+          - 'eslint-plugin-import-x'
+          - 'eslint-plugin-react'
+          - 'eslint-plugin-react-hooks'          
+          - '@eslint-community/eslint-utils'
+          - '@eslint-react/eslint-plugin'
           - '@eslint/js'
       vitest-ecosystem:
         patterns:
