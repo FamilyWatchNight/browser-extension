@@ -21,7 +21,7 @@
     "zustand": "^5.0.15"
   },
   "devDependencies": {
-    "@crxjs/vite-plugin": "^2.7.1",
+    "@crxjs/vite-plugin": "^3.0.0",
     "@eslint-community/eslint-utils": "^4.10.1",
     "@eslint-react/eslint-plugin": "^5.24.10",
     "@eslint/js": "^10.0.1",
