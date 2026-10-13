@@ -33,10 +33,13 @@ Amazon/Prime Video, and Tubi: caption candidates are discovered automatically,
 their bodies are fetched, and the captions are normalized into downloadable
 VTT and JSON artifacts. Further candidates appeared incrementally in the
 open popup. This is a major milestone across three different provider
-formats, not proof that every candidate or every session will succeed. Pluto's
-visible captions have not yielded native cues or a confirmed complete body.
-These results argue for a layered, evidence-driven discovery pipeline rather
-than service-specific assumptions or a single URL heuristic.
+formats, not proof that every candidate or every session will succeed. Pluto
+now exposes a Shaka subtitle `TextTrack` whose cue list changes during
+playback, and the player fetches successful responses from a separate
+`text/en-cc/*.m4s` path alongside audio and video segments. Whether those
+fragments or the exposed cues can provide the complete transcript remains
+unconfirmed. These results argue for a layered, evidence-driven discovery
+pipeline rather than service-specific assumptions or a single URL heuristic.
 
 Some prior browser findings were collected after rebuilding and explicitly
 reloading the extension from Chrome's Manage Extensions page. Other early
@@ -219,6 +222,32 @@ default next step.
 - The initial probe found a `native-track` with track metadata and
   subtitle-related evidence. Captions were visible in the player, but the
   exposed `TextTrack` had no usable cues.
+- A later read-only CDP observation ran while playback advanced from about
+  75 to 150 seconds. The video exposed a `TextTrack` labeled `Shaka Player
+  TextTrack`, with `kind: subtitles` and `mode: hidden`. Its cue list changed
+  from one cue to seven; the first cue in the later snapshot began at about
+  88.5 seconds. No active cues were reported in either snapshot. This shows
+  that some timed cues are available through the page's native track while
+  playback progresses, but it does not establish that the track retains the
+  complete movie transcript. Cue text and response bodies were not inspected.
+- A further snapshot at about 433 seconds showed five subtitle cues spanning
+  approximately 390 to 434 seconds, again with no active cues. Together with
+  the earlier snapshots, this suggests Shaka retains a moving window of cues
+  rather than accumulating the entire transcript in `TextTrack.cues`; older
+  cues appear to fall out of the exposed list as playback advances.
+- During the same 75-second network observation, CDP saw 15 successful
+  (`200`) Fetch responses from a path shaped like
+  `/dash/.../text/en-cc/<segment>.m4s`, with response MIME type
+  `video/iso.segment`. Audio and video segment requests were also observed.
+  This is strong evidence that Pluto's Shaka player obtains subtitle data as
+  segmented media, apparently over a DASH-style path, rather than as a
+  standalone `.srt` or `.vtt` file. The segment bodies and startup manifest
+  were not inspected, so their exact encoding and whether they can be
+  assembled into a complete transcript remain unknown.
+- The current generic resource-URL heuristic does not identify `.m4s` or
+  `/text/en-cc/` by themselves as caption-file signals. Even if recognized,
+  an individual media segment is not evidence of a complete downloadable
+  caption source.
 - Native extraction once generated header-only WebVTT. This was a false
   success; empty cue lists must be rejected and reported with diagnostics.
 - Probe diagnostics were expanded to include track mode, `<track>` ready
@@ -230,8 +259,12 @@ default next step.
   strongly suggest these are fonts, not subtitles; actual response bytes were
   not inspected here, so record them as likely false positives rather than
   conclusively identifying the body.
-- Whether complete Pluto caption text is present in a readable response body
-  or uses a different player-specific pipeline remains unresolved.
+- The latest observation makes a Shaka text track plus segmented subtitle
+  requests the leading explanation for Pluto's caption path. It remains
+  unknown exactly how to obtain or reconstruct all cues without missing or
+  duplicating them, and what initialization/manifest data that would require.
+  The exposed cue list appears to be a rolling window, so reading it only once
+  after playback will not recover earlier captions.
 
 ## What "available" means
 
