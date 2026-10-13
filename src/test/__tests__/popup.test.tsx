@@ -355,4 +355,90 @@ describe('popup video discovery', () => {
     expect(screen.getByText('1 response body read(s) failed.')).toBeTruthy();
     expect(screen.getByRole('button', { name: 'Pause CDP monitoring' })).toBeTruthy();
   });
+
+  it('shows privacy-safe retrieval failure diagnostics', async () => {
+    chromeFixture.chrome.tabs.sendMessage = vi.fn().mockResolvedValue([
+      {
+        id: 'video-1',
+        src: 'video.mp4',
+        title: 'Video',
+        duration: 10,
+        currentTime: 0,
+        paused: true,
+        frameIndex: 0,
+      },
+    ]);
+    render(<PopupApp />);
+    await act(async () => {
+      await vi.waitFor(() =>
+        expect(chromeFixture.port.postMessage).toHaveBeenCalledWith({
+          type: 'REQUEST_CAPTION_STATE',
+          tabId: 1,
+        }),
+      );
+      await Promise.resolve();
+    });
+
+    await act(async () => {
+      chromeFixture.portMessageListeners[0]({
+        type: 'CAPTION_STATE_UPDATED',
+        state: {
+          tabId: 1,
+          phase: 'non-cdp-complete',
+          discovery: {
+            schemaVersion: 1,
+            capturedAt: new Date().toISOString(),
+            candidates: [
+              {
+                id: 'caption-source-1',
+                videoId: 'video-1',
+                kind: 'resource-url',
+                format: 'unknown',
+                url: 'https://captions.example/subtitles?token=do-not-display',
+                displayUrl: 'https://captions.example/subtitles',
+                confidence: 'low',
+                timing: 'unknown',
+                evidence: [],
+              },
+            ],
+            limitations: [],
+          },
+          retrievals: {
+            'caption-source-1': {
+              success: false,
+              candidateId: 'caption-source-1',
+              warnings: [],
+              failure: {
+                category: 'network',
+                message: 'Browser fetch failed before an HTTP response was available',
+                diagnostics: {
+                  stage: 'request',
+                  endpoint: 'https://captions.example',
+                },
+              },
+            },
+          },
+          retrievingCandidateIds: [],
+          diagnostics: {
+            responsesObserved: 0,
+            bodiesRead: 0,
+            bodyReadFailures: 0,
+            candidatesAccepted: 0,
+            ignoredByReason: {},
+          },
+          updatedAt: new Date().toISOString(),
+        },
+      });
+      await Promise.resolve();
+    });
+
+    expect(screen.getByText('Stage: request')).toBeTruthy();
+    expect(
+      screen.getByText('Endpoint: https://captions.example (query and path omitted)'),
+    ).toBeTruthy();
+    expect(
+      screen.getByText(/No HTTP response was exposed.*CORS, DNS, TLS, or another network failure/),
+    ).toBeTruthy();
+    expect(screen.queryByText(/do-not-display/)).toBeNull();
+  });
 });

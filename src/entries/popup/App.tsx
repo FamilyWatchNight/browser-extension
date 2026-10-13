@@ -287,14 +287,27 @@ export default function PopupApp() {
   }
 
   function isCaptionRetrievalResponse(response: unknown): response is CaptionRetrievalResponse {
+    if (
+      !response ||
+      typeof response !== 'object' ||
+      !('success' in response) ||
+      typeof response.success !== 'boolean' ||
+      !('candidateId' in response) ||
+      typeof response.candidateId !== 'string' ||
+      !('warnings' in response) ||
+      !Array.isArray(response.warnings)
+    ) {
+      return false;
+    }
+    if (response.success) return true;
     return Boolean(
-      response &&
-      typeof response === 'object' &&
-      'success' in response &&
-      typeof response.success === 'boolean' &&
-      'candidateId' in response &&
-      'warnings' in response &&
-      Array.isArray(response.warnings),
+      'failure' in response &&
+        response.failure &&
+        typeof response.failure === 'object' &&
+        'category' in response.failure &&
+        typeof response.failure.category === 'string' &&
+        'message' in response.failure &&
+        typeof response.failure.message === 'string',
     );
   }
 
@@ -643,6 +656,44 @@ export default function PopupApp() {
                     {retrieval?.failure && (
                       <div role="alert" style={{ color: '#b91c1c' }}>
                         {retrieval.failure.category}: {retrieval.failure.message}
+                        {retrieval.failure.diagnostics && (
+                          <div style={{ color: '#7f1d1d', marginTop: '4px' }}>
+                            <div>
+                              Stage: {retrieval.failure.diagnostics.stage.replace(/-/g, ' ')}
+                            </div>
+                            {retrieval.failure.diagnostics.endpoint && (
+                              <div>
+                                Endpoint: {retrieval.failure.diagnostics.endpoint} (query and path
+                                omitted)
+                              </div>
+                            )}
+                            {retrieval.failure.diagnostics.stage === 'request' && (
+                              <div>Request: GET with browser credentials included</div>
+                            )}
+                            {retrieval.failure.diagnostics.httpStatus !== undefined && (
+                              <div>
+                                HTTP status: {retrieval.failure.diagnostics.httpStatus}
+                              </div>
+                            )}
+                            {retrieval.failure.diagnostics.contentType && (
+                              <div>
+                                Response type: {retrieval.failure.diagnostics.contentType}
+                              </div>
+                            )}
+                            {retrieval.failure.diagnostics.responseBytes !== undefined && (
+                              <div>
+                                Response size: {retrieval.failure.diagnostics.responseBytes} bytes
+                              </div>
+                            )}
+                            {retrieval.failure.diagnostics.stage === 'request' && (
+                              <div>
+                                No HTTP response was exposed to the extension; the browser does
+                                not identify whether this was CORS, DNS, TLS, or another network
+                                failure.
+                              </div>
+                            )}
+                          </div>
+                        )}
                       </div>
                     )}
                     {captionRetrievalErrors[candidate.id] && (

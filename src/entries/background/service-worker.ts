@@ -254,7 +254,11 @@ async function discoverCaptionSources(tabId: number): Promise<CaptionDiscoveryRe
       capturedAt: new Date().toISOString(),
       candidates: mergeCaptionCandidates(
         tabId,
-        mergePassiveCaptionCandidates(current.discovery?.candidates || [], discovery.candidates),
+        mergePassiveCaptionCandidates(
+          tabId,
+          current.discovery?.candidates || [],
+          discovery.candidates,
+        ),
         cdpCandidatesByTab.get(tabId) || [],
       ),
     };
@@ -287,7 +291,11 @@ async function handleCaptionDiscoveryUpdate(
     capturedAt: new Date().toISOString(),
     candidates: mergeCaptionCandidates(
       tabId,
-      mergePassiveCaptionCandidates(current.discovery?.candidates || [], incoming.candidates),
+      mergePassiveCaptionCandidates(
+        tabId,
+        current.discovery?.candidates || [],
+        incoming.candidates,
+      ),
       cdpCandidatesByTab.get(tabId) || [],
     ),
     limitations: [...new Set([...(current.discovery?.limitations || []), ...incoming.limitations])],
@@ -300,21 +308,104 @@ async function handleCaptionDiscoveryUpdate(
 }
 
 function mergePassiveCaptionCandidates(
+  tabId: number,
   existing: CaptionSourceCandidate[],
   incoming: CaptionSourceCandidate[],
 ): CaptionSourceCandidate[] {
   const merged = [...existing];
   incoming.forEach((candidate) => {
-    const duplicate = merged.some((item) =>
-      item.url && candidate.url
-        ? item.url === candidate.url
-        : item.kind === candidate.kind &&
+    const duplicateIndex = merged.findIndex((item) => {
+      if (item.url && candidate.url) return item.url === candidate.url;
+      if (!item.url && !candidate.url) {
+        return (
+          item.kind === candidate.kind &&
           item.videoId === candidate.videoId &&
-          item.nativeTrackIndex === candidate.nativeTrackIndex,
-    );
-    if (!duplicate) merged.push(candidate);
+          item.nativeTrackIndex === candidate.nativeTrackIndex
+        );
+      }
+      return (
+        item.kind === candidate.kind &&
+        item.videoId === candidate.videoId &&
+        Boolean(item.displayUrl && item.displayUrl === candidate.displayUrl)
+      );
+    });
+    if (duplicateIndex < 0) {
+      merged.push(candidate);
+      return;
+    }
+
+    const current = merged[duplicateIndex];
+    if (Boolean(current.url) === Boolean(candidate.url)) return;
+    merged[duplicateIndex] = {
+      ...current,
+      ...candidate,
+      id: current.id,
+      url: current.url || candidate.url,
+      displayUrl: candidate.displayUrl || current.displayUrl,
+      evidence: [
+        ...current.evidence,
+        ...candidate.evidence.filter(
+          (evidence) =>
+            !current.evidence.some(
+              (item) =>
+                item.description === evidence.description &&
+                item.selector === evidence.selector &&
+                item.fieldPath === evidence.fieldPath,
+            ),
+        ),
+      ],
+    };
   });
-  return merged;
+  return ensureUniqueCandidateIds(tabId, merged);
+}
+
+function ensureUniqueCandidateIds(
+  tabId: number,
+  candidates: CaptionSourceCandidate[],
+): CaptionSourceCandidate[] {
+  const seen = new Set<string>();
+  const ambiguousIds = new Set<string>();
+  const uniqueCandidates = candidates.map((candidate) => {
+    if (!seen.has(candidate.id)) {
+      seen.add(candidate.id);
+      return candidate;
+    }
+
+    ambiguousIds.add(candidate.id);
+    const identity = candidate.url || [
+      candidate.kind,
+      candidate.videoId,
+      candidate.nativeTrackIndex ?? 'page',
+      candidate.displayUrl || '',
+    ].join(':');
+    const baseId = `${candidate.id}-${hashCandidateIdentity(identity)}`;
+    let uniqueId = baseId;
+    let suffix = 2;
+    while (seen.has(uniqueId)) {
+      uniqueId = `${baseId}-${suffix++}`;
+    }
+    seen.add(uniqueId);
+    return { ...candidate, id: uniqueId };
+  });
+
+  if (ambiguousIds.size > 0) {
+    const retrievals = captionRetrievalsByTab.get(tabId);
+    const payloads = captionPayloadsByTab.get(tabId);
+    ambiguousIds.forEach((id) => {
+      retrievals?.delete(id);
+      payloads?.delete(id);
+    });
+  }
+  return uniqueCandidates;
+}
+
+function hashCandidateIdentity(identity: string): string {
+  let hash = 2166136261;
+  for (let index = 0; index < identity.length; index += 1) {
+    hash ^= identity.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+  return (hash >>> 0).toString(36);
 }
 
 function handleSetCaptionCdpMonitoring(
@@ -508,7 +599,7 @@ function mergeCaptionCandidates(
       };
     }
   });
-  return merged;
+  return ensureUniqueCandidateIds(tabId, merged);
 }
 
 function cacheCaptionPayloadForCandidate(
@@ -642,12 +733,16 @@ async function handleRetrieveCaptionSource(
   retrievingCandidateIdsByTab.set(tabId, retrieving);
   const currentState = getCaptionState(tabId);
   await updateCaptionState(tabId, currentState.phase, currentState.discovery);
+  const finishRetrieval = (result: CaptionRetrievalResponse) => {
+    cacheCaptionRetrieval(tabId, candidateId, result);
+    sendResponse(result);
+  };
   try {
     let discovery = captionCandidatesByTab.get(tabId);
     if (!discovery) discovery = await requestCaptionDiscovery(tabId);
-    const candidate = discovery?.candidates.find(({ id }) => id === candidateId);
-    if (!candidate) {
-      sendResponse({
+    const discoveredCandidate = discovery?.candidates.find(({ id }) => id === candidateId);
+    if (!discoveredCandidate) {
+      finishRetrieval({
         success: false,
         candidateId,
         warnings: [],
@@ -658,13 +753,14 @@ async function handleRetrieveCaptionSource(
       });
       return;
     }
+    const candidate = discoveredCandidate;
     const cachedResult = captionRetrievalsByTab.get(tabId)?.get(candidateId);
     if (cachedResult?.success) {
       sendResponse(cachedResult);
       return;
     }
     if (!candidate.url && candidate.kind !== 'native-track') {
-      sendResponse({
+      finishRetrieval({
         success: false,
         candidateId,
         warnings: [],
@@ -687,12 +783,15 @@ async function handleRetrieveCaptionSource(
               reject(new Error(chrome.runtime.lastError.message));
               return;
             }
-            resolve(response as CaptionRetrievalResponse);
+            if (!isCaptionRetrievalResponse(response, candidateId)) {
+              reject(new Error('Content script returned an invalid caption retrieval response.'));
+              return;
+            }
+            resolve(response);
           },
         );
       });
-      cacheCaptionRetrieval(tabId, candidateId, result);
-      sendResponse(result);
+      finishRetrieval(result);
       return;
     }
 
@@ -718,34 +817,57 @@ async function handleRetrieveCaptionSource(
         },
       );
       const result = { success: true, candidateId, raw, normalized, warnings: normalized.warnings };
-      cacheCaptionRetrieval(tabId, candidateId, result);
-      sendResponse(result);
+      finishRetrieval(result);
     } catch (error) {
       const result = {
         success: false,
         candidateId,
         raw,
         warnings: [],
-        failure: { category: 'unsupported-format', message: formatError(error) },
+        failure: {
+          category: 'unsupported-format',
+          message: formatError(error),
+          diagnostics: { stage: 'payload-validation' as const },
+        },
       } as CaptionRetrievalResponse;
-      cacheCaptionRetrieval(tabId, candidateId, result);
-      sendResponse(result);
+      finishRetrieval(result);
     }
   } catch (error) {
     const result: CaptionRetrievalResponse = {
       success: false,
       candidateId,
       warnings: [],
-      failure: { category: classifyFetchFailure(error), message: formatError(error) },
+      failure: {
+        category: classifyFetchFailure(error),
+        message: formatError(error),
+        diagnostics: { stage: 'content-script-bridge' },
+      },
     };
-    cacheCaptionRetrieval(tabId, candidateId, result);
-    sendResponse(result);
+    finishRetrieval(result);
   } finally {
     retrieving.delete(candidateId);
     if (retrieving.size === 0) retrievingCandidateIdsByTab.delete(tabId);
     const state = getCaptionState(tabId);
     await updateCaptionState(tabId, state.phase, state.discovery);
   }
+
+}
+
+function isCaptionRetrievalResponse(
+  response: unknown,
+  candidateId: string,
+): response is CaptionRetrievalResponse {
+  return Boolean(
+    response &&
+      typeof response === 'object' &&
+      'success' in response &&
+      typeof response.success === 'boolean' &&
+      'candidateId' in response &&
+      response.candidateId === candidateId &&
+      'warnings' in response &&
+      Array.isArray(response.warnings) &&
+      (response.success || ('failure' in response && response.failure)),
+  );
 }
 
 async function captureCaptionSourcesWithDebugger(

@@ -15,7 +15,11 @@ import {
   createCaptionResourceCandidate,
   isLikelyCaptionResourceUrl,
 } from '../../shared/utils/caption-discovery';
-import { detectCaptionFormat, fetchCaptionPayload } from '../../shared/utils/caption-fetch';
+import {
+  CaptionFetchError,
+  detectCaptionFormat,
+  fetchCaptionPayload,
+} from '../../shared/utils/caption-fetch';
 import {
   exportNormalizedWebVtt,
   normalizeCaptionPayload,
@@ -399,14 +403,23 @@ async function handleRetrieveCaptionSourceInPage(
       warnings: normalized.warnings,
     });
   } catch (error) {
+    const failure: NonNullable<CaptionRetrievalResponse['failure']> =
+      error instanceof CaptionFetchError
+        ? {
+            category: error.category,
+            message: error.message,
+            diagnostics: error.diagnostics,
+          }
+        : {
+            category: candidate.kind === 'native-track' ? 'invalid-payload' : 'unsupported-format',
+            message: error instanceof Error ? error.message : String(error),
+            diagnostics: { stage: 'payload-validation' as const },
+          };
     sendResponse({
       success: false,
       candidateId: candidate.id,
       warnings: [],
-      failure: {
-        category: candidate.kind === 'native-track' ? 'invalid-payload' : 'network',
-        message: error instanceof Error ? error.message : String(error),
-      },
+      failure,
     });
   }
 }

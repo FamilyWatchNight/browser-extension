@@ -125,6 +125,22 @@ export type CaptionFailureCategory =
   | 'invalid-payload'
   | 'inaccessible';
 
+export type CaptionRetrievalFailureStage =
+  | 'url-validation'
+  | 'request'
+  | 'response'
+  | 'response-body'
+  | 'payload-validation'
+  | 'content-script-bridge';
+
+export interface CaptionRetrievalFailureDiagnostics {
+  stage: CaptionRetrievalFailureStage;
+  endpoint?: string;
+  httpStatus?: number;
+  contentType?: string;
+  responseBytes?: number;
+}
+
 export interface CaptionSourceEvidence {
   description: string;
   selector?: string;
@@ -296,6 +312,7 @@ export interface CaptionRetrievalResponse {
   failure?: {
     category: CaptionFailureCategory;
     message: string;
+    diagnostics?: CaptionRetrievalFailureDiagnostics;
   };
 }
 

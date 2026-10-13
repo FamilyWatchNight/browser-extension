@@ -1,7 +1,22 @@
-import type { CaptionSourceFormat } from '../messages';
+import type {
+  CaptionFailureCategory,
+  CaptionRetrievalFailureDiagnostics,
+  CaptionSourceFormat,
+} from '../messages';
 
 export const MAX_CAPTION_BYTES = 10 * 1024 * 1024;
 export const FETCH_TIMEOUT_MS = 15_000;
+
+export class CaptionFetchError extends Error {
+  constructor(
+    message: string,
+    readonly category: CaptionFailureCategory,
+    readonly diagnostics: CaptionRetrievalFailureDiagnostics,
+  ) {
+    super(message);
+    this.name = 'CaptionFetchError';
+  }
+}
 
 export function validateCaptionUrl(value: string): URL | undefined {
   try {
@@ -55,36 +70,93 @@ export async function fetchCaptionPayload(url: string): Promise<{
   finalUrl: string;
 }> {
   const validatedUrl = validateCaptionUrl(url);
-  if (!validatedUrl) throw new Error('Caption URL is not an allowed HTTP(S) resource');
+  if (!validatedUrl) {
+    throw new CaptionFetchError(
+      'Caption URL is not an allowed HTTP(S) resource',
+      'inaccessible',
+      { stage: 'url-validation' },
+    );
+  }
 
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
   try {
-    const response = await fetch(validatedUrl, {
-      credentials: 'include',
-      redirect: 'follow',
-      signal: controller.signal,
-    });
-    if (!response.ok) throw new Error(`Caption request failed with HTTP ${response.status}`);
+    let response: Response;
+    try {
+      response = await fetch(validatedUrl, {
+        credentials: 'omit',
+        redirect: 'follow',
+        signal: controller.signal,
+      });
+    } catch (error) {
+      const timedOut =
+        controller.signal.aborted ||
+        (error instanceof DOMException && error.name === 'AbortError');
+      throw new CaptionFetchError(
+        timedOut
+          ? `Caption request timed out after ${FETCH_TIMEOUT_MS} ms`
+          : 'Browser fetch failed before an HTTP response was available',
+        timedOut ? 'timeout' : 'network',
+        { stage: 'request', endpoint: validatedUrl.origin },
+      );
+    }
+
+    const responseDiagnostics = {
+      stage: 'response' as const,
+      endpoint: validatedUrl.origin,
+      httpStatus: response.status,
+      contentType: sanitizeContentType(response.headers.get('content-type')),
+    };
+    if (!response.ok) {
+      const category: CaptionFailureCategory =
+        response.status === 401 || response.status === 403 ? 'auth' : 'network';
+      throw new CaptionFetchError(
+        `Caption request failed with HTTP ${response.status}`,
+        category,
+        responseDiagnostics,
+      );
+    }
 
     const declaredLength = Number(response.headers.get('content-length'));
     if (Number.isFinite(declaredLength) && declaredLength > MAX_CAPTION_BYTES) {
-      throw new Error(`Caption response exceeds ${MAX_CAPTION_BYTES} bytes`);
+      throw new CaptionFetchError(
+        `Caption response exceeds ${MAX_CAPTION_BYTES} bytes`,
+        'size-limit',
+        { ...responseDiagnostics, responseBytes: declaredLength },
+      );
     }
 
-    const payload = await response.text();
+    let payload: string;
+    try {
+      payload = await response.text();
+    } catch {
+      throw new CaptionFetchError(
+        'The response was received, but its body could not be read',
+        'network',
+        responseDiagnostics,
+      );
+    }
     const byteLength = new TextEncoder().encode(payload).byteLength;
-    if (byteLength > MAX_CAPTION_BYTES)
-      throw new Error(`Caption response exceeds ${MAX_CAPTION_BYTES} bytes`);
+    if (byteLength > MAX_CAPTION_BYTES) {
+      throw new CaptionFetchError(
+        `Caption response exceeds ${MAX_CAPTION_BYTES} bytes`,
+        'size-limit',
+        { ...responseDiagnostics, responseBytes: byteLength },
+      );
+    }
     return {
       payload,
-      contentType: response.headers.get('content-type') || undefined,
+      contentType: responseDiagnostics.contentType,
       byteLength,
       finalUrl: response.url,
     };
   } finally {
     clearTimeout(timeout);
   }
+}
+
+function sanitizeContentType(contentType: string | null): string | undefined {
+  return contentType?.split(';', 1)[0]?.trim() || undefined;
 }
 
 function isPrivateHost(hostname: string): boolean {

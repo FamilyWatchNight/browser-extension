@@ -28,17 +28,15 @@ text tracks, a directly fetchable caption file, page-visible data, or a
 captured network response. A visible caption overlay alone is not a complete
 transcript.
 
-The project has confirmed useful complete-caption paths for Prime Video,
-YouTube, and Tubi, but the evidence and access conditions differ. Most
-recently, the user confirmed that YouTube, Amazon/Prime Video, and Tubi now
-surface timed-caption URL candidates automatically through passive discovery:
-no `Find captions` click or CDP session was needed, and further candidates
-arrived over time while the popup remained open. This is a major improvement
-to discovery and live popup synchronization, but it does not establish that
-every candidate can be fetched or that its body contains usable timed cues.
-Pluto's visible captions have not yielded native cues or a confirmed complete
-body. These results argue for a layered, evidence-driven discovery pipeline
-rather than service-specific assumptions or a single URL heuristic.
+The project has now confirmed a working, non-CDP end-to-end path on YouTube,
+Amazon/Prime Video, and Tubi: caption candidates are discovered automatically,
+their bodies are fetched, and the captions are normalized into downloadable
+VTT and JSON artifacts. Further candidates appeared incrementally in the
+open popup. This is a major milestone across three different provider
+formats, not proof that every candidate or every session will succeed. Pluto's
+visible captions have not yielded native cues or a confirmed complete body.
+These results argue for a layered, evidence-driven discovery pipeline rather
+than service-specific assumptions or a single URL heuristic.
 
 Some prior browser findings were collected after rebuilding and explicitly
 reloading the extension from Chrome's Manage Extensions page. Other early
@@ -50,17 +48,14 @@ passive discovery and retrieval findings therefore describe the reloaded
 build, although they do not by themselves verify CDP behavior because those
 tests did not rely on CDP.
 
-The current evidence separates a now-confirmed improvement in passive
-discovery from unresolved retrieval failures. YouTube, Amazon/Prime Video, and
-Tubi all exposed caption URL candidates automatically, without manual
-discovery or CDP, and additional candidates appeared incrementally in the
-open popup. Earlier tests found that YouTube's timed text downloaded
-successfully while Amazon and Tubi fetches failed with network errors; the
-latest confirmation concerns discovery and popup updates, not a re-test of
-retrieval. A discovered URL is not proof that its body can be fetched,
-validated, normalized, or downloaded. The next evidence-based increment
-should target that separate retrieval boundary, while preserving and
-regression-testing the newly working passive discovery behavior.
+The current evidence confirms automatic passive discovery, retrieval, and
+normalization on YouTube, Amazon/Prime Video, and Tubi without `Find captions`
+or CDP. Earlier Amazon and Tubi network failures, and the later Tubi
+inaccessible-candidate error, were resolved during investigation: omitting
+credentials fixed the Amazon fetch, and preserving original URLs plus unique
+candidate identities fixed the Tubi retrieval path. Continue to keep
+discovery, fetch, validation, and normalization as separate observable
+stages; preserve and regression-test this working cross-provider flow.
 
 The CDP response-validation increment has focused automated coverage, but
 its live Chrome behavior has not yet been retested. Earlier observations of
@@ -128,6 +123,15 @@ default next step.
   `credentials: 'omit'`; the response allowed `Access-Control-Allow-Origin: *`
   and did not allow credentialed CORS. This is evidence about that resource,
   not a general rule for all Amazon URLs or other services.
+- The latest retrieval diagnostic for this same timed-text host reports a
+  browser fetch failure before an HTTP response while the extension used
+  `credentials: 'include'`. Together with the earlier wildcard-CORS evidence,
+  this makes credentialed CORS the leading explanation for this Amazon
+  failure, though the browser does not expose enough detail to confirm it.
+  Direct caption fetches were changed to omit credentials; subsequent browser
+  testing confirmed this fixed the Amazon download for the tested resource.
+- The user has since confirmed Amazon captions fetch and normalize
+  successfully, along with YouTube and Tubi, through the non-CDP flow.
 - The CDP watcher also captured and recognized a usable TTML body. The video
   elements inspected did not expose usable native text-track cues.
 - Passive discovery can show generic player-resource JSON or a caption-like
@@ -138,12 +142,13 @@ default next step.
   found without CDP, but required repeated `Find captions` clicks. In the
   latest browser validation, Amazon/Prime Video caption URLs appeared
   automatically without clicking `Find captions` or starting CDP, and
-  additional candidates arrived over time in the open popup. This confirms
-  the passive discovery/update behavior for the tested session, not
-  end-to-end retrieval.
+  additional candidates arrived over time in the open popup. The user has
+  since confirmed that the discovered captions fetch and normalize
+  successfully without CDP.
 - Fetching a previously discovered Amazon URL failed with a network error.
-  This does not establish the cause, and retrieval has not yet been reported
-  as re-tested alongside the latest discovery success.
+  Subsequent evidence narrowed the failure to a request made with credentials;
+  after changing direct caption fetches to omit credentials, the user
+  confirmed Amazon captions fetch and normalize successfully.
 - A prior browser run found a `.ttml2` candidate only after CDP monitoring
   was paused and successfully downloaded it. That confirms a usable CDP path
   for that run, distinct from the latest passive-discovery URL whose fetch
@@ -167,8 +172,9 @@ default next step.
   automatically without clicking `Find captions` or starting CDP, and
   additional candidates arrived over time in the open popup. This supersedes
   the earlier repeated-click behavior as the latest discovery result; it does
-  not by itself establish that every candidate is a valid timed-text body or
-  that retrieval remains reliable across sessions.
+  not by itself establish that every candidate is a valid timed-text body.
+- The user has now confirmed the full YouTube path: captions are found,
+  fetched, and normalized into VTT and JSON artifacts without CDP.
 - Earlier CDP testing reported a base64 JSON metadata data URL mislabeled as
   SRT alongside a separate JSON timed-text response, and candidates appeared
   only after pausing CDP. These were observed before the current CDP
@@ -188,21 +194,25 @@ default next step.
 - A later CDP experiment captured and normalized a Tubi caption payload.
   Passive discovery and CDP may report the same URL. Deduplication must keep
   the captured body reachable from the candidate shown to the user.
-- Thus a complete Tubi SRT and a CDP capture path are confirmed; reliable
-  discovery and behavior should still be checked against current diagnostics.
-  This supersedes the earlier open-question wording in
+- Thus a complete Tubi SRT and a CDP capture path are confirmed; the later
+  end-to-end non-CDP success is recorded below. This supersedes the earlier
+  open-question wording in
   `caption-capture-notes.md` that said no Tubi path had been verified.
 - The latest browser validation confirms that Tubi caption URLs appeared
   automatically without clicking `Find captions` or starting CDP, with
   additional candidates arriving over time in the open popup. Earlier
-  attempts to fetch the discovered URL failed with a network error; the
-  explicit error was `network: Failed to fetch`. The latest report confirms
-  discovery, not a new retrieval attempt. Whether the browser request is
-  rejected by CORS, credentials, service policy, or another fetch condition
-  is unverified.
-- Because YouTube's discovered timed text downloaded successfully while
-  Amazon and Tubi fetches failed, success at URL discovery cannot be used as
-  a proxy for retrieval capability; treat each stage and result separately.
+  attempts to fetch the discovered URL failed with a network error, then with
+  `inaccessible: Caption candidate does not expose a fetchable URL` even
+  though the popup displayed a manually fetchable source. Investigation found
+  that incremental candidate scans could reuse IDs for different candidates;
+  retrieval state was keyed by ID, so an SRT fetch could be confused with an
+  adjacent DOM-sample candidate. Candidate merges now preserve an original
+  fetch URL and ensure distinct candidates have distinct IDs. The user has
+  since confirmed that Tubi captions now fetch and normalize to VTT and JSON
+  artifacts without CDP.
+- The latest result confirms the full path on YouTube, Amazon, and Tubi, but
+  success for these tested sources is not proof that all candidates will
+  fetch; continue to report each stage and result separately.
 
 ### Pluto
 
@@ -254,18 +264,24 @@ header is not evidence of a complete downloadable caption source.
   The user has now confirmed live automatic discovery of caption URL
   candidates on YouTube, Amazon, and Tubi without a manual `Find captions`
   action or CDP, with further candidates appearing over time while the popup
-  stays open. This validates the central incremental-discovery milestone.
-  Whether the same candidates persist after popup close/reopen has not yet
-  been reported for this test. If `PerformanceObserver` is unavailable or
-  cannot observe resource entries, the content script reports that limitation
-  in its console rather than silently claiming continuous observation.
+  stays open. The user has since confirmed that all three providers also
+  fetch successfully and normalize to VTT and JSON artifacts. Candidate
+  persistence after popup close/reopen remains unverified. If
+  `PerformanceObserver` is unavailable or cannot observe resource entries,
+  the content script reports that limitation in its console rather than
+  silently claiming continuous observation.
 - `src/shared/utils/caption-discovery.ts` finds native tracks, resource-timing
   URLs, caption-like URLs in selected page JSON scripts, and caption-shaped
   DOM surfaces. It does not read network response bodies.
 - `src/shared/utils/caption-fetch.ts` recognizes WebVTT, TTML, SRT, and JSON
-  and fetches a known URL. Current shared fetching omits credentials. Other
-  credential policies remain unverified and should be handled explicitly
-  rather than generalized from the Prime Video observation.
+  and fetches a known URL with `credentials: 'omit'`. This avoids sending
+  page cookies to caption hosts and matches the confirmed Prime Video
+  resource behavior; other services may have different requirements.
+  Retrieval failures now carry a stage plus privacy-safe request/response diagnostics: request
+  endpoint origin only (no path or query), HTTP status, sanitized MIME type,
+  and response size when available. A browser-level failure before an HTTP
+  response is exposed remains ambiguous; the UI explicitly avoids claiming
+  that it proves CORS, DNS, TLS, or another particular cause.
 - `src/entries/background/service-worker.ts` first performs passive page
   discovery and direct page-context retrieval. CDP monitoring is a separate,
   explicit action that reloads the tab. The current CDP run is bounded by a
@@ -338,11 +354,11 @@ header is not evidence of a complete downloadable caption source.
 - Earlier browser tests found YouTube and Amazon timed-caption URLs only after
   multiple manual `Find captions` actions; that discovery symptom is
   superseded by the latest user-confirmed automatic discovery on YouTube,
-  Amazon, and Tubi. Earlier retrieval tests still matter: YouTube's candidate
-  downloaded successfully, while Amazon and Tubi candidates failed with
-  network errors. The current non-CDP priority is therefore retrieval and
-  payload validation, not adding more discovery polling or retries without
-  evidence. Avoid making CDP changes the next step absent a concrete need.
+  Amazon, and Tubi. Earlier Amazon/Tubi retrieval failures were also resolved
+  and are superseded by the user's confirmation of end-to-end fetch and
+  normalization on all three services. Prioritize lifecycle reliability and
+  Pluto's unresolved caption path over further Amazon/Tubi retrieval changes,
+  unless new failures provide evidence for another gap.
 - In the latest run after a clean `chrome:debug` launch, the popup initially
   continued to find the video across repeated close/reopen cycles, but did
   not find the timed-text resource. Only after clicking Chrome's extension
@@ -368,16 +384,14 @@ header is not evidence of a complete downloadable caption source.
   "already running" message may have come from stale loaded code: the
   extension had been rebuilt but not reloaded through Chrome's Manage
   Extensions page. Those reports are not reliable evidence about the current
-  build. The latest passive-discovery and network-error report was made after
-  reloading the rebuilt extension, and is current evidence for those
-  non-CDP behaviors. It does not verify the CDP triage changes; live
-  verification of that increment is still pending.
+  build. Later browser tests confirm current passive discovery and successful
+  fetch/normalization on YouTube, Amazon, and Tubi. They do not verify the CDP
+  triage changes; live verification of that increment is still pending.
 - The implementation has focused unit-test, type-check, lint, and build
   coverage for the CDP triage increment. Current browser validation is still
-  required for CDP body filtering and incremental UI updates; Tubi
-  direct-fetch behavior remains unresolved.
-  Popup reopen and MV3 worker-suspension behavior also need confirmation in a
-  live extension.
+  required for CDP body filtering and incremental UI updates. Popup reopen
+  and MV3 worker-suspension behavior also need confirmation in a live
+  extension.
 - Related implementation files are being actively changed; inspect the
   current working tree before assuming these details have not changed.
 
@@ -385,21 +399,28 @@ header is not evidence of a complete downloadable caption source.
 
 The intended architecture puts state in the background, persists it for the
 browser session, and sends popup updates. The latest browser result confirms
-that passive candidates are now discovered and streamed into an open popup
-automatically on three services. Remaining gaps are end-to-end retrieval,
-candidate/body validation, and lifecycle verification:
+automatic discovery, fetch, and normalization on three services. Remaining
+gaps include repeated-session reliability, popup-close/reopen restoration,
+and Pluto's still-unconfirmed complete-caption path:
 
-- Earlier repeated-click discovery on Amazon and YouTube is historical and is
-  superseded by the latest confirmation: YouTube, Amazon, and Tubi now surfaced
-  candidates with no `Find captions` click and no CDP, with more candidates
-  appearing over time in the open popup. The mechanism's reliability across
-  sessions and persistence after popup close/reopen remain unverified.
-- YouTube's timed text downloaded successfully. Fetching the discovered
-  Amazon and Tubi URLs failed with network errors. For Tubi, the explicit
-  failure previously shown was `network: Failed to fetch`; for the latest
-  Amazon report, no lower-level error was provided. The origin of these
-  failures (including request context, CORS, credentials, response status, or
-  service policy) has not been established.
+- The user confirmed end-to-end non-CDP operation on YouTube, Amazon, and
+  Tubi: each automatically finds caption candidates, fetches captions, and
+  normalizes them into VTT and JSON artifacts. Further candidates appeared
+  incrementally in the open popup. This supersedes earlier reports of
+  repeated manual discovery and Amazon/Tubi retrieval failures.
+- The Amazon request initially failed before an HTTP response when sent with
+  credentials. The CDN had previously been observed to permit wildcard CORS
+  only for requests without credentials. Direct caption fetches now omit
+  credentials, and the user confirmed Amazon retrieval succeeded afterward.
+- Tubi previously returned an inaccessible-candidate error on both the SRT
+  and neighboring DOM-sample rows. Investigation identified duplicate
+  candidate IDs across incremental scans, causing retrieval state and UI
+  outcomes to be associated with the wrong candidate. The background now
+  ensures distinct candidates have distinct IDs and preserves the original
+  fetch URL when enriching a matching candidate. The user subsequently
+  confirmed successful Tubi fetch and normalization.
+- Remaining lifecycle checks: repeatability across separate sessions and
+  restoration after popup close/reopen. Pluto remains an open provider case.
 - Earlier browser tests showed Amazon/YouTube CDP candidates appearing only
   after `Pause CDP`. The implementation now intends to publish validated
   candidates live, but this remains unverified in Chrome after the CDP
@@ -488,6 +509,13 @@ The eventual UX should:
   stage that failed. Surface only the detail useful in the current view; do
   not report a native cue failure as a network failure or describe a
   candidate URL as a successfully captured transcript.
+- For a failed direct retrieval, show actionable diagnostics only when the
+  browser exposes them: the stage, HTTP status and response MIME type if
+  received, response size if known, and the endpoint origin. Never show or
+  persist query strings, signed URLs, credentials, or caption bodies as
+  diagnostics. Treat `Failed to fetch` without an HTTP response as
+  inconclusive rather than asserting CORS or another specific browser-policy
+  cause.
 - Treat repeated user actions as resume/refresh or a deliberate retry, not as
   accidental duplicate operations. A running operation should be visible and
   not produce an unexplained "already running" dead end. If CDP is used,
