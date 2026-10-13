@@ -44,6 +44,42 @@ describe('popup video discovery', () => {
     expect(screen.getByText('Found 1 video(s)')).toBeTruthy();
   });
 
+  it('does not replace active-tab videos with unscoped or other-tab state', async () => {
+    const video = {
+      id: 'video-1',
+      src: 'video.mp4',
+      title: 'Video',
+      duration: 10,
+      currentTime: 0,
+      paused: true,
+      frameIndex: 0,
+    };
+    chromeFixture.chrome.tabs.sendMessage = vi.fn().mockResolvedValue([video]);
+
+    render(<PopupApp />);
+
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(screen.getByText('Found 1 video(s)')).toBeTruthy();
+
+    await act(async () => {
+      chromeFixture.portMessageListeners[0]({
+        type: 'STATE_UPDATED',
+        state: { isEnabled: true, videos: [], playbackState: {}, settings: { isEnabled: true } },
+      });
+      chromeFixture.portMessageListeners[0]({
+        type: 'STATE_UPDATED',
+        tabId: 2,
+        state: { isEnabled: true, videos: [], playbackState: {}, settings: { isEnabled: true } },
+      });
+      await Promise.resolve();
+    });
+
+    expect(screen.getByText('Found 1 video(s)')).toBeTruthy();
+  });
+
   it('retries after a message failure', async () => {
     const video = {
       id: 'video-1',
@@ -306,7 +342,11 @@ describe('popup video discovery', () => {
       await Promise.resolve();
     });
 
-    expect(screen.getByText('CDP is actively monitoring network responses after reload. Keep playback going.')).toBeTruthy();
+    expect(
+      screen.getByText(
+        'CDP is actively monitoring network responses after reload. Keep playback going.',
+      ),
+    ).toBeTruthy();
     expect(screen.getByText('Captions retrieved successfully.')).toBeTruthy();
     expect(screen.getByText('Traffic summary:').parentElement?.textContent).toContain(
       '7 responses inspected; 2 bodies checked; 1 timed-text candidate(s) accepted.',

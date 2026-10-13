@@ -4,12 +4,17 @@ import type {
   CaptionDiagnosticsResponse,
   CaptionDiscoveryResponse,
   CaptionRetrievalResponse,
+  CaptionSourceCandidate,
   ContentScriptMessage,
   ScreenshotResponse,
   VideoElement,
 } from '../../shared/messages';
 import { collectCaptionDiagnostics } from '../../shared/utils/caption-diagnostics';
-import { collectCaptionSourceDiscovery } from '../../shared/utils/caption-discovery';
+import {
+  collectCaptionSourceDiscovery,
+  createCaptionResourceCandidate,
+  isLikelyCaptionResourceUrl,
+} from '../../shared/utils/caption-discovery';
 import { detectCaptionFormat, fetchCaptionPayload } from '../../shared/utils/caption-fetch';
 import {
   exportNormalizedWebVtt,
@@ -23,8 +28,14 @@ const detectedVideos: Map<string, HTMLVideoElement> = new Map();
 const videoCleanups: Map<HTMLVideoElement, () => void> = new Map();
 const documentObservers: Map<Document, MutationObserver> = new Map();
 const iframeLoadHandlers: Map<HTMLIFrameElement, () => void> = new Map();
+const publishedCaptionCandidateKeys = new Set<string>();
+const observedCaptionResourceUrls = new Set<string>();
 let refreshTimer: ReturnType<typeof setTimeout> | undefined;
 let metadataTimer: ReturnType<typeof setTimeout> | undefined;
+let captionDiscoveryTimer: ReturnType<typeof setTimeout> | undefined;
+let captionResourceObserver: PerformanceObserver | undefined;
+let captionObserverWarningLogged = false;
+let nextObservedCandidateId = 1;
 let activeAudioRecorder: MediaRecorder | undefined;
 let activeAudioStream: MediaStream | undefined;
 let audioChunks: Blob[] = [];
@@ -161,7 +172,90 @@ function scheduleRefresh() {
     refreshTimer = undefined;
     syncDocumentObservers();
     refreshDetectedVideos();
+    scheduleCaptionDiscoveryUpdate();
   }, 100);
+}
+
+function scheduleCaptionDiscoveryUpdate() {
+  if (captionDiscoveryTimer !== undefined) return;
+
+  captionDiscoveryTimer = setTimeout(() => {
+    captionDiscoveryTimer = undefined;
+    publishNewCaptionCandidates();
+  }, 250);
+}
+
+function getCaptionCandidateKey(candidate: CaptionSourceCandidate): string {
+  if (candidate.url) return `${candidate.kind}:${candidate.url}`;
+  return `${candidate.kind}:${candidate.videoId}:${candidate.nativeTrackIndex ?? 'page'}`;
+}
+
+function publishNewCaptionCandidates() {
+  refreshDetectedVideos();
+  const discovery = collectCaptionSourceDiscovery(
+    Array.from(detectedVideos.entries()).map(([id, element]) => ({ id, element })),
+  );
+  const resourceVideoId = detectedVideos.keys().next().value || 'unknown-video';
+  const observedUrls = Array.from(observedCaptionResourceUrls);
+  observedUrls.forEach((url) => {
+    if (discovery.candidates.some((candidate) => candidate.url === url)) return;
+    discovery.candidates.push({
+      ...createCaptionResourceCandidate(url, resourceVideoId),
+      id: `caption-source-observed-${nextObservedCandidateId++}`,
+    });
+  });
+  const candidates = discovery.candidates.filter((candidate) => {
+    const key = getCaptionCandidateKey(candidate);
+    if (publishedCaptionCandidateKeys.has(key)) return false;
+    publishedCaptionCandidateKeys.add(key);
+    return true;
+  });
+  if (candidates.length === 0) {
+    observedUrls.forEach((url) => observedCaptionResourceUrls.delete(url));
+    return;
+  }
+
+  void chrome.runtime
+    .sendMessage({
+      type: 'CAPTION_DISCOVERY_UPDATE',
+      discovery: { ...discovery, candidates },
+    })
+    .then(() => observedUrls.forEach((url) => observedCaptionResourceUrls.delete(url)))
+    .catch((error: unknown) => {
+      candidates.forEach((candidate) =>
+        publishedCaptionCandidateKeys.delete(getCaptionCandidateKey(candidate)),
+      );
+      if (captionObserverWarningLogged) return;
+      captionObserverWarningLogged = true;
+      console.warn('[Content Script] Could not publish caption discovery update:', error);
+    });
+}
+
+function observeCaptionResources() {
+  if (typeof PerformanceObserver === 'undefined') {
+    console.warn(
+      '[Content Script] PerformanceObserver is unavailable; late caption resources will not be observed.',
+    );
+    return;
+  }
+
+  try {
+    captionResourceObserver = new PerformanceObserver((list) => {
+      let foundCaptionResource = false;
+      list.getEntries().forEach((entry) => {
+        const url = (entry as PerformanceResourceTiming).name;
+        if (!isLikelyCaptionResourceUrl(url)) return;
+        observedCaptionResourceUrls.add(url);
+        foundCaptionResource = true;
+      });
+      if (foundCaptionResource) scheduleCaptionDiscoveryUpdate();
+    });
+    captionResourceObserver.observe({ type: 'resource', buffered: true });
+  } catch (error) {
+    captionResourceObserver?.disconnect();
+    captionResourceObserver = undefined;
+    console.warn('[Content Script] Could not observe resource timing entries:', error);
+  }
 }
 
 function registerMessageListener() {
@@ -224,6 +318,8 @@ function initializeContentScript() {
   refreshDetectedVideos();
   console.log(`[Content Script] Found ${detectedVideos.size} video elements`);
   syncDocumentObservers();
+  observeCaptionResources();
+  scheduleCaptionDiscoveryUpdate();
 }
 
 function handleGetVideoElements(sendResponse: (data: VideoElement[]) => void) {

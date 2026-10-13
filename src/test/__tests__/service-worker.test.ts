@@ -66,13 +66,91 @@ describe('service-worker message contracts', () => {
 
     chromeFixture.connectListeners[0](chromeFixture.port);
     const sendResponse = vi.fn();
-    chromeFixture.messageListeners[0]({ type: 'VIDEO_STATE_UPDATE', videos }, {}, sendResponse);
+    chromeFixture.messageListeners[0](
+      { type: 'VIDEO_STATE_UPDATE', videos },
+      { tab: { id: 42 } },
+      sendResponse,
+    );
 
     expect(sendResponse).toHaveBeenCalledWith({ success: true });
     expect(chromeFixture.port.postMessage).toHaveBeenLastCalledWith({
       type: 'STATE_UPDATED',
       state: expect.objectContaining({ videos }),
+      tabId: 42,
     });
+  });
+
+  it('merges passive caption updates into the active tab state and persists them', async () => {
+    await import('../../entries/background/service-worker');
+    chromeFixture.connectListeners[0](chromeFixture.port);
+    const candidate = {
+      id: 'caption-source-live',
+      videoId: 'video-1',
+      kind: 'resource-url',
+      format: 'unknown',
+      url: 'https://captions.example/api/timedtext?lang=en',
+      displayUrl: 'https://captions.example/api/timedtext',
+      confidence: 'low',
+      timing: 'unknown',
+      evidence: [{ description: 'Resource timing entry matched timed-text URL heuristics' }],
+    };
+
+    chromeFixture.messageListeners[0](
+      {
+        type: 'CAPTION_DISCOVERY_UPDATE',
+        discovery: {
+          schemaVersion: 1,
+          capturedAt: new Date().toISOString(),
+          candidates: [candidate],
+          limitations: [],
+        },
+      },
+      { tab: { id: 42 } },
+      vi.fn(),
+    );
+
+    await vi.waitFor(() =>
+      expect(chromeFixture.port.postMessage).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: 'CAPTION_STATE_UPDATED',
+          state: expect.objectContaining({
+            tabId: 42,
+            phase: 'non-cdp-complete',
+            discovery: expect.objectContaining({ candidates: [candidate] }),
+          }),
+        }),
+      ),
+    );
+    await vi.waitFor(() =>
+      expect(chromeFixture.sessionStorage.captionCaptureStates).toEqual(
+        expect.objectContaining({
+          '42': expect.objectContaining({
+            discovery: expect.objectContaining({ candidates: [candidate] }),
+          }),
+        }),
+      ),
+    );
+
+    chromeFixture.messageListeners[0](
+      {
+        type: 'CAPTION_DISCOVERY_UPDATE',
+        discovery: {
+          schemaVersion: 1,
+          capturedAt: new Date().toISOString(),
+          candidates: [{ ...candidate, id: 'duplicate-caption-id' }],
+          limitations: [],
+        },
+      },
+      { tab: { id: 42 } },
+      vi.fn(),
+    );
+    const persistedStates = chromeFixture.sessionStorage.captionCaptureStates as Record<
+      string,
+      { discovery?: { candidates: unknown[] } }
+    >;
+    await vi.waitFor(() =>
+      expect(persistedStates['42']?.discovery?.candidates).toEqual([candidate]),
+    );
   });
 
   it('sends current state on port requests and stops after disconnect', async () => {
@@ -221,22 +299,20 @@ describe('service-worker message contracts', () => {
       {},
       startResponse,
     );
-    await vi.waitFor(() => expect(startResponse).toHaveBeenCalledWith(expect.objectContaining({ success: true })));
+    await vi.waitFor(() =>
+      expect(startResponse).toHaveBeenCalledWith(expect.objectContaining({ success: true })),
+    );
     await vi.waitFor(() => expect(chromeFixture.debuggerEventListeners).toHaveLength(1));
 
     const [onDebuggerEvent] = chromeFixture.debuggerEventListeners;
-    onDebuggerEvent(
-      { tabId: 42 },
-      'Network.responseReceived',
-      {
-        requestId: 'caption-request',
-        type: 'XHR',
-        response: {
-          url: 'data:application/json;base64,private-caption-payload',
-          mimeType: 'text/plain',
-        },
+    onDebuggerEvent({ tabId: 42 }, 'Network.responseReceived', {
+      requestId: 'caption-request',
+      type: 'XHR',
+      response: {
+        url: 'data:application/json;base64,private-caption-payload',
+        mimeType: 'text/plain',
       },
-    );
+    });
     onDebuggerEvent({ tabId: 42 }, 'Network.loadingFinished', { requestId: 'caption-request' });
 
     await vi.waitFor(() =>
@@ -275,6 +351,8 @@ describe('service-worker message contracts', () => {
       {},
       pauseResponse,
     );
-    await vi.waitFor(() => expect(pauseResponse).toHaveBeenCalledWith(expect.objectContaining({ success: true })));
+    await vi.waitFor(() =>
+      expect(pauseResponse).toHaveBeenCalledWith(expect.objectContaining({ success: true })),
+    );
   });
 });

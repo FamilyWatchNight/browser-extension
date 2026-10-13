@@ -76,16 +76,19 @@ export default function PopupApp() {
     setPort(newPort);
 
     newPort.postMessage({ type: 'REQUEST_STATE' });
-    let captionTabId: number | undefined;
+    let activeTabId: number | undefined;
     const handlePortMessage = (message: {
       type: string;
       state: ExtensionState | CaptionCaptureState;
+      tabId?: number;
     }) => {
       if (message.type === 'STATE_UPDATED') {
-        updateVideos((message.state as ExtensionState).videos);
+        if (message.tabId !== undefined && message.tabId === activeTabId) {
+          updateVideos((message.state as ExtensionState).videos);
+        }
       } else if (
         message.type === 'CAPTION_STATE_UPDATED' &&
-        captionTabId === (message.state as CaptionCaptureState).tabId
+        activeTabId === (message.state as CaptionCaptureState).tabId
       ) {
         const state = message.state as CaptionCaptureState;
         setCaptionCaptureState(state);
@@ -100,7 +103,7 @@ export default function PopupApp() {
 
     void chrome.tabs.query({ active: true, currentWindow: true }).then(([tab]) => {
       if (!tab.id) return;
-      captionTabId = tab.id;
+      activeTabId = tab.id;
       newPort.postMessage({ type: 'REQUEST_CAPTION_STATE', tabId: tab.id });
     });
     fetchVideoElements();

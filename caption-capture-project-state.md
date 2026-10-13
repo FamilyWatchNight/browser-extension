@@ -29,10 +29,16 @@ captured network response. A visible caption overlay alone is not a complete
 transcript.
 
 The project has confirmed useful complete-caption paths for Prime Video,
-YouTube, and Tubi, but the evidence and access conditions differ. Pluto's
-visible captions have not yielded native cues or a confirmed complete body.
-These results argue for a layered, evidence-driven discovery pipeline rather
-than service-specific assumptions or a single URL heuristic.
+YouTube, and Tubi, but the evidence and access conditions differ. Most
+recently, the user confirmed that YouTube, Amazon/Prime Video, and Tubi now
+surface timed-caption URL candidates automatically through passive discovery:
+no `Find captions` click or CDP session was needed, and further candidates
+arrived over time while the popup remained open. This is a major improvement
+to discovery and live popup synchronization, but it does not establish that
+every candidate can be fetched or that its body contains usable timed cues.
+Pluto's visible captions have not yielded native cues or a confirmed complete
+body. These results argue for a layered, evidence-driven discovery pipeline
+rather than service-specific assumptions or a single URL heuristic.
 
 Some prior browser findings were collected after rebuilding and explicitly
 reloading the extension from Chrome's Manage Extensions page. Other early
@@ -44,23 +50,62 @@ passive discovery and retrieval findings therefore describe the reloaded
 build, although they do not by themselves verify CDP behavior because those
 tests did not rely on CDP.
 
-The current issues are inconsistent passive discovery and service-dependent
-retrieval failures. YouTube and Amazon can eventually expose their real timed
-caption URLs without CDP, but the user needed to click `Find captions` several
-times, including after captions were already visible in the player. The user
-suspects that waiting before first opening the popup may affect whether the
-source is found, but this timing relationship is unconfirmed. Tubi also
-exposed its real SRT URL without CDP. The YouTube timed text downloaded
-successfully; fetches from the discovered Amazon and Tubi URLs failed with
-network errors. Thus finding a real URL and retrieving its body are separate
-stages, and neither repeated manual discovery nor a discovered URL should be
-treated as proof of reliable end-to-end capture.
+The current evidence separates a now-confirmed improvement in passive
+discovery from unresolved retrieval failures. YouTube, Amazon/Prime Video, and
+Tubi all exposed caption URL candidates automatically, without manual
+discovery or CDP, and additional candidates appeared incrementally in the
+open popup. Earlier tests found that YouTube's timed text downloaded
+successfully while Amazon and Tubi fetches failed with network errors; the
+latest confirmation concerns discovery and popup updates, not a re-test of
+retrieval. A discovered URL is not proof that its body can be fetched,
+validated, normalized, or downloaded. The next evidence-based increment
+should target that separate retrieval boundary, while preserving and
+regression-testing the newly working passive discovery behavior.
 
 The CDP response-validation increment has focused automated coverage, but
 its live Chrome behavior has not yet been retested. Earlier observations of
 CDP-only delayed candidate updates and false-positive metadata/font
 candidates remain useful motivating evidence, not confirmation of current
 behavior after the latest implementation changes.
+
+**Content-script loading investigation:** The reported YouTube errors are
+consistent with a possible content-script loading or lifecycle problem, but
+the exact relationship to missed caption discovery is not established.
+Inspection found that the local `node_modules` had
+`@crxjs/vite-plugin@2.7.1`, while both `package.json` and `package-lock.json`
+specify version 3.0.0. Restoring dependencies with `npm ci` brought the
+installed plugin back to 3.0.0. A clean production build and all three
+production browser tests then passed, including content-script messaging on
+initial load, after delayed video insertion, and with accessible iframe
+content. The user subsequently rebuilt and reloaded the extension, closed the
+entire browser, and ran the `chrome:debug` task multiple times. Chrome still
+reported an unsafe attempt to load the generated content-script module URL
+from YouTube's page URL. Despite that error, timed-text discovery eventually
+worked in at least one run. Thus the error persists in the user's environment,
+but the extension can also function despite it; whether the warning reflects
+a blocked essential module, a non-fatal browser warning, or a contributing
+intermittent fault remains unknown. The test-browser result does not
+reproduce or dismiss the user's Chrome warning.
+
+The user initially observed the same open YouTube tab and paused video show
+the video and timed-text candidate in one popup opening, then no videos in a
+later opening. The user could not test `Find captions` in the empty state
+because that control is hidden when no videos are detected. A code inspection
+found competing video-state sources (a direct active-tab query and global
+background snapshots), so video broadcasts were made tab-scoped and the
+popup now ignores unscoped or other-tab updates; focused tests cover this
+guard. Subsequent controlled-by-user repetition clarified the observed
+boundary: popup close/reopen by itself did not lose the video, while clicking
+`Reload` in Chrome's extension manager with the YouTube tab still open
+reproducibly caused the popup to show no videos. The same sequence worked
+again after closing the browser, launching `chrome:debug`, and confirming the
+video before reloading the extension. This points to extension reload
+invalidating the already-injected content script rather than ordinary popup
+reopening. Since extension reload with a page left open is not a normal user
+workflow, do not prioritize preserving that page's content script across the
+reload; refresh the page after extension reload when validating. The
+tab-scoping safeguard is still valid, but the observations do not establish
+that its race caused the earlier symptom or that it addresses the reload case.
 
 **Current investigation priority: improve the non-CDP workflow.** CDP is
 disruptive to the user, so do not spend the next increment polishing CDP
@@ -89,12 +134,16 @@ default next step.
   DOM surface without showing the actual TTML. The TTML request may appear
   later, and a post-hoc resource-timing snapshot can miss it. Do not stop
   observation at the first JSON-like response.
-- In the latest browser report, the real timed-caption URL was eventually
-  found without CDP, but required repeated `Find captions` clicks. The user
-  observed that captions were already visible in the player by the time
-  discovery succeeded. The URL was found, but fetching it failed with a
-  network error. This is consistent with the previously observed
-  service-dependent fetch failure, but does not establish its cause.
+- In an earlier browser report, the real timed-caption URL was eventually
+  found without CDP, but required repeated `Find captions` clicks. In the
+  latest browser validation, Amazon/Prime Video caption URLs appeared
+  automatically without clicking `Find captions` or starting CDP, and
+  additional candidates arrived over time in the open popup. This confirms
+  the passive discovery/update behavior for the tested session, not
+  end-to-end retrieval.
+- Fetching a previously discovered Amazon URL failed with a network error.
+  This does not establish the cause, and retrieval has not yet been reported
+  as re-tested alongside the latest discovery success.
 - A prior browser run found a `.ttml2` candidate only after CDP monitoring
   was paused and successfully downloaded it. That confirms a usable CDP path
   for that run, distinct from the latest passive-discovery URL whose fetch
@@ -111,14 +160,15 @@ default next step.
 - Initial passive classification called the request `player-control`. The
   useful body was identified by inspecting the actual downloaded response,
   not by trusting that classification.
-- In the latest browser report, passive discovery eventually found the real
+- In an earlier browser report, passive discovery eventually found the real
   timed-caption URL without CDP, after the user clicked `Find captions`
-  multiple times. The user successfully downloaded the timed text from that
-  candidate.
-- It is not known whether discovery succeeded because more playback/network
-  activity had occurred, because the popup was opened later, or for another
-  reason. The relationship between popup-open timing, repeated discovery
-  requests, and player caption visibility needs a controlled test.
+  multiple times, and the user successfully downloaded the timed text.
+- In the latest browser validation, YouTube caption URLs appeared
+  automatically without clicking `Find captions` or starting CDP, and
+  additional candidates arrived over time in the open popup. This supersedes
+  the earlier repeated-click behavior as the latest discovery result; it does
+  not by itself establish that every candidate is a valid timed-text body or
+  that retrieval remains reliable across sessions.
 - Earlier CDP testing reported a base64 JSON metadata data URL mislabeled as
   SRT alongside a separate JSON timed-text response, and candidates appeared
   only after pausing CDP. These were observed before the current CDP
@@ -142,12 +192,14 @@ default next step.
   discovery and behavior should still be checked against current diagnostics.
   This supersedes the earlier open-question wording in
   `caption-capture-notes.md` that said no Tubi path had been verified.
-- The latest browser report again found Tubi's real SRT URL without CDP, but
-  fetching it failed with a network error. The earlier explicit error was
-  `network: Failed to fetch`; the latest report did not provide additional
-  details. The URL is discoverable, but direct retrieval remains unreliable.
-  Whether the browser request is rejected by CORS, credentials, service
-  policy, or another fetch condition is unverified.
+- The latest browser validation confirms that Tubi caption URLs appeared
+  automatically without clicking `Find captions` or starting CDP, with
+  additional candidates arriving over time in the open popup. Earlier
+  attempts to fetch the discovered URL failed with a network error; the
+  explicit error was `network: Failed to fetch`. The latest report confirms
+  discovery, not a new retrieval attempt. Whether the browser request is
+  rejected by CORS, credentials, service policy, or another fetch condition
+  is unverified.
 - Because YouTube's discovered timed text downloaded successfully while
   Amazon and Tubi fetches failed, success at URL discovery cannot be used as
   a proxy for retrieval capability; treat each stage and result separately.
@@ -188,6 +240,25 @@ header is not evidence of a complete downloadable caption source.
 
 ## Current implementation shape
 
+- Passive discovery now starts when the content script initializes, observes
+  resource timing entries with a buffered `PerformanceObserver`, and debounces
+  rescans after relevant DOM changes. Likely caption URLs observed by the
+  observer are sent incrementally to the background, including the observed
+  URL itself so a timing-buffer rollover cannot silently discard the trigger.
+  The background deduplicates candidates per tab, persists the merged state,
+  and broadcasts it to an open popup. A popup opened later receives the same
+  stored candidates. Resource-URL candidates remain low-confidence and their
+  format is not inferred beyond existing URL evidence.
+- Focused automated tests cover a late resource becoming a content-script
+  candidate and the background persisting/broadcasting its incremental update.
+  The user has now confirmed live automatic discovery of caption URL
+  candidates on YouTube, Amazon, and Tubi without a manual `Find captions`
+  action or CDP, with further candidates appearing over time while the popup
+  stays open. This validates the central incremental-discovery milestone.
+  Whether the same candidates persist after popup close/reopen has not yet
+  been reported for this test. If `PerformanceObserver` is unavailable or
+  cannot observe resource entries, the content script reports that limitation
+  in its console rather than silently claiming continuous observation.
 - `src/shared/utils/caption-discovery.ts` finds native tracks, resource-timing
   URLs, caption-like URLs in selected page JSON scripts, and caption-shaped
   DOM surfaces. It does not read network response bodies.
@@ -230,21 +301,63 @@ header is not evidence of a complete downloadable caption source.
   still uses URL, DOM, and page-resource evidence, so its candidates may be
   less certain until retrieval validates their contents. Do not interpret
   every passive candidate as a confirmed caption file.
+- The popup's `Failed to fetch videos: ... Receiving end does not exist`
+  means its `GET_VIDEO_ELEMENTS` message had no listening content script in
+  that tab; it is not evidence that the page contains no video. The reported
+  `Extension context invalidated` and a missing receiver are expected if a
+  tab remains open across an extension reload and its existing content script
+  belongs to the invalidated extension context. The user reproduced this:
+  the popup detected YouTube's video before extension-manager `Reload`, then
+  showed no videos after reload with that tab still open. Closing the browser
+  and starting a fresh `chrome:debug` session restored detection until the
+  extension was reloaded again. Treat this as a development/reload lifecycle
+  boundary; refresh the tab after reloading the extension rather than trying
+  to keep old content scripts alive.
+- The unsafe attempt to load the generated extension bundle from YouTube
+  still appears after restoring the locked CRXJS 3.0.0 dependency, a full
+  browser close, and repeated `chrome:debug` runs. In at least one such fresh
+  session, timed-text discovery eventually succeeded. Its relationship to
+  candidate discovery remains unknown; do not assume it explains the
+  intermittent caption candidate or video state.
+- Popup video rendering previously accepted unscoped background state for any
+  tab alongside the direct active-tab query. This allowed stale or
+  other-tab `videos: []` state to clear a valid active-tab result. Video
+  broadcasts now carry their sender tab ID, and the popup ignores unscoped or
+  non-active-tab video updates. Focused tests pass for this behavior, but
+  browser observations have not shown that this was the cause of the reported
+  disappearance: repeated popup openings preserved videos until Chrome's
+  extension-manager `Reload` was clicked while the tab stayed open. After
+  reloading the extension, refresh the page so Chrome injects a fresh content
+  script. If the popup still has no video after that refresh, then diagnose a
+  current content-script connection failure.
 - Popup state remains ephemeral by design, but the background state is
   mirrored to session storage so worker termination does not by itself erase
   progress or retrieved artifacts. Session storage is scoped to the browser
   session and has a quota; persistence across browser restarts or unusually
   large caption sets is not established.
-- The latest browser report found YouTube and Amazon timed-caption URLs
-  without CDP, but only after multiple manual `Find captions` actions. A
-  possible relationship to when the popup was first opened is a user
-  hypothesis, not an established cause. YouTube's candidate downloaded
-  successfully; the discovered Amazon URL failed with a network error. Tubi's
-  discovered `.srt` URL also failed to fetch. Prioritize measuring and
-  improving this non-CDP path. Determine whether discovery needs to observe
-  for longer, refresh automatically, or instead lacks fresh page state before
-  changing its polling or retry behavior. Avoid making CDP changes the next
-  step absent a concrete need.
+- Earlier browser tests found YouTube and Amazon timed-caption URLs only after
+  multiple manual `Find captions` actions; that discovery symptom is
+  superseded by the latest user-confirmed automatic discovery on YouTube,
+  Amazon, and Tubi. Earlier retrieval tests still matter: YouTube's candidate
+  downloaded successfully, while Amazon and Tubi candidates failed with
+  network errors. The current non-CDP priority is therefore retrieval and
+  payload validation, not adding more discovery polling or retries without
+  evidence. Avoid making CDP changes the next step absent a concrete need.
+- In the latest run after a clean `chrome:debug` launch, the popup initially
+  continued to find the video across repeated close/reopen cycles, but did
+  not find the timed-text resource. Only after clicking Chrome's extension
+  manager `Reload` with the tab still open did the popup report no videos;
+  the user reproduced this behavior. This reload case should not be confused
+  with normal popup reopening and need not be fixed unless a real user
+  workflow exhibits it.
+- Earlier YouTube observations were inconsistent: waiting for visible
+  captions before opening the popup did not always make the timed-text
+  resource appear. The latest browser test supersedes that uncertainty for
+  the tested session: timed-caption candidates appeared automatically and
+  incrementally without CDP or a manual discovery action. Whether that result
+  is repeatable across sessions and whether candidates survive popup
+  close/reopen remain to be checked. The unsafe-load warning's relationship
+  to discovery remains unknown.
 - When one tab enters CDP mode, the user reports seeing Chrome's
   `"Family Watch Night - Virtual Remote Control" started debugging this browser`
   banner across the top of newly opened tabs. This indicates Chrome is
@@ -271,16 +384,16 @@ header is not evidence of a complete downloadable caption source.
 ## User experience and state problem
 
 The intended architecture puts state in the background, persists it for the
-browser session, and sends popup updates. Browser observations show that
-discovery and retrieval still do not reliably match the experience:
+browser session, and sends popup updates. The latest browser result confirms
+that passive candidates are now discovered and streamed into an open popup
+automatically on three services. Remaining gaps are end-to-end retrieval,
+candidate/body validation, and lifecycle verification:
 
-- Repeated `Find captions` clicks were needed before Amazon and YouTube
-  passive discovery returned the actual timed-caption URLs, even though
-  captions were already visible on screen. The user wonders whether waiting
-  before opening the popup matters, but this has not been isolated from other
-  timing factors. It is unknown whether repeated clicks trigger genuinely new
-  page scans, retry a missed request, or merely reveal state gathered since
-  the previous scan.
+- Earlier repeated-click discovery on Amazon and YouTube is historical and is
+  superseded by the latest confirmation: YouTube, Amazon, and Tubi now surfaced
+  candidates with no `Find captions` click and no CDP, with more candidates
+  appearing over time in the open popup. The mechanism's reliability across
+  sessions and persistence after popup close/reopen remain unverified.
 - YouTube's timed text downloaded successfully. Fetching the discovered
   Amazon and Tubi URLs failed with network errors. For Tubi, the explicit
   failure previously shown was `network: Failed to fetch`; for the latest
@@ -293,6 +406,21 @@ discovery and retrieval still do not reliably match the experience:
   triage change. This is not the immediate focus: CDP entails a disruptive
   debugger attachment/reload, while the latest run found usable URLs through
   passive discovery.
+- The user confirmed that repeated popup openings preserved video detection
+  in a paused YouTube tab until the extension itself was reloaded from
+  `chrome://extensions` while the tab remained open. After that reload, video
+  detection failed until a fresh browser/debug session; this is consistent
+  with an invalidated content-script context in an already-open page and is
+  not the normal user flow. Refresh the page after extension reload for
+  subsequent checks. A separate tab-scoping safeguard was implemented because
+  global background video snapshots were ambiguous, but it has not been
+  shown to cause or fix this reload-specific behavior.
+- The unsafe-load message persisted after the full browser close and repeated
+  `chrome:debug` runs, while timed-text discovery eventually worked in at
+  least one earlier run and has now succeeded automatically across three
+  services. Whether that error contributes to discovery or has any relation
+  to retrieval remains unknown; do not treat it as the cause without new
+  evidence.
 - Earlier CDP parsing labeled JSON metadata and WOFF2 font responses as SRT.
   The current CDP body-validation path is designed to reject these cases;
   verify that in the browser. Passive candidates remain a separate,
@@ -305,13 +433,13 @@ discovery and retrieval still do not reliably match the experience:
   should not be the focus of the next increment; the longer-term goal is to
   remove any need for it. The debugger banner's actual attachment scope
   remains unverified.
-- These observations establish symptoms, not their implementation cause.
-  Capture whether each discovery click causes a new scan and what new page
-  evidence appeared between scans before deciding on polling, retries, or
-  popup-open timing changes.
+- These observations establish outcomes, not the cause of Amazon/Tubi fetch
+  failures. Capture the request context and the exact failing retrieval stage
+  before changing fetch behavior.
 - Earlier reports of popup reopen losing state and repeated actions colliding
   remain lifecycle cases to validate. Session-backed persistence is intended
-  to address worker termination, but has not been confirmed in a live browser.
+  to address worker termination, but the latest automatic-discovery test did
+  not report whether candidates survived popup close/reopen.
 
 Treat this as a state-ownership and lifecycle design problem, not merely a
 popup refresh bug. There should be one authoritative capture state per tab
@@ -391,16 +519,16 @@ architecture that meets the lifecycle and recovery requirements.
 Make progress in observable stages; do not change several uncertain parts at
 once.
 
-1. **Reproduce the non-CDP workflow first.** For one target tab and a confirmed
-   reloaded extension build, record popup-open time, playback/caption
-   visibility, each `Find captions` action, candidate changes, retrieval
-   request start/end times, exact error text, and visible states. Compare a
-   scan immediately after opening the popup with later scans while playback
-   continues. Establish whether each click runs a fresh scan, whether any
-   observation is continuous or only a snapshot, and whether newly available
-   page evidence explains the eventual result. Repeat with the popup left
-   open and closed/reopened. Test CDP/debugger scope only if needed to answer a
-   specific question; do not make its disruptive lifecycle the main
+1. **Investigate the remaining non-CDP retrieval gap.** Automatic,
+   incremental candidate discovery while the popup stays open is now
+   user-confirmed for YouTube, Amazon, and Tubi. Do not spend the next
+   increment trying to reproduce the earlier repeated-click discovery
+   symptom unless it returns. Instead, for a known likely candidate, record
+   the redacted host/path, request context, response status and MIME type when
+   available, exact stage-specific error, and whether the body validates as
+   timed text. Re-test popup close/reopen separately to establish whether
+   incremental candidates persist. Test CDP/debugger scope only if needed to
+   answer a specific question; do not make its disruptive lifecycle the main
    investigation path.
 2. **Define state and invariants before editing.** Specify what identifies a
    capture, which component owns each state, allowed transitions, retry and
@@ -416,12 +544,16 @@ once.
    failure/retry, page reload, and worker restart. Confirm a captured body
    remains accessible through the visible candidate identity.
 5. **Improve non-CDP discovery and retrieval one evidenced gap at a time.**
-   Record the failing stage, compare observations across services, establish
-   whether the candidate appears through native tracks, page resources, or
-   another passive signal, and determine why retrieval succeeds or fails.
-   Add the smallest service-agnostic capability justified by that evidence;
-   preserve working paths and avoid provider-specific assumptions where a
-   generic lifecycle or browser-policy cause explains the symptom.
+   Passive resource observation now streams likely candidates into popup
+   state, and its automatic incremental behavior is confirmed in live browser
+   use on YouTube, Amazon, and Tubi. Preserve this milestone with regression
+   coverage. Focus the next implementation on the separately unresolved
+   retrieval/validation stage, comparing the known Amazon and Tubi failures
+   with YouTube's previously successful download. Determine whether the
+   failure is in request context, browser policy, response reading, parsing,
+   or another specific stage before changing behavior. Add the smallest
+   service-agnostic capability justified by evidence; do not broaden provider
+   heuristics as a proxy for a fetch problem.
 6. **Re-test representative providers without CDP first.** At minimum
    exercise passive/native discovery, direct retrieval, and structured JSON
    normalization with Prime Video, Tubi, YouTube, and Pluto as available.

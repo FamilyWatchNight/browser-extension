@@ -95,6 +95,16 @@ chrome.runtime.onMessage.addListener(
           handleDiscoverCaptionSources(sender.tab.id, sendResponse);
         }
         return true;
+      case 'CAPTION_DISCOVERY_UPDATE':
+        if (sender.tab?.id !== undefined) {
+          void handleCaptionDiscoveryUpdate(sender.tab.id, message.discovery).catch((error) => {
+            console.error(
+              '[Service Worker] Failed to process passive caption discovery update:',
+              formatError(error),
+            );
+          });
+        }
+        return false;
       case 'SET_CAPTION_CDP_MONITORING':
         handleSetCaptionCdpMonitoring(message.tabId, message.action, sendResponse);
         return true;
@@ -125,7 +135,7 @@ chrome.runtime.onMessage.addListener(
 
       case 'VIDEO_STATE_UPDATE':
         useExtensionStore.getState().setVideos(message.videos);
-        broadcastState();
+        broadcastState(sender.tab?.id);
         sendResponse({ success: true });
         return true;
 
@@ -183,9 +193,9 @@ chrome.tabs.onRemoved.addListener((tabId) => {
   void persistCaptionStates();
 });
 
-function broadcastState() {
+function broadcastState(tabId?: number) {
   const state = useExtensionStore.getState();
-  popupPorts.forEach((port) => port.postMessage({ type: 'STATE_UPDATED', state }));
+  popupPorts.forEach((port) => port.postMessage({ type: 'STATE_UPDATED', state, tabId }));
 }
 
 function handleGetVideoElements(tabId: number, sendResponse: (data: VideoElement[]) => void) {
@@ -238,12 +248,13 @@ async function discoverCaptionSources(tabId: number): Promise<CaptionDiscoveryRe
     const passiveDiscovery = await requestCaptionDiscovery(tabId);
     const discovery =
       passiveDiscovery || createDiscoveryFailure('Passive page discovery was unavailable.');
+    const current = getCaptionState(tabId);
     const merged: CaptionDiscoveryResponse = {
       ...discovery,
       capturedAt: new Date().toISOString(),
       candidates: mergeCaptionCandidates(
         tabId,
-        discovery.candidates,
+        mergePassiveCaptionCandidates(current.discovery?.candidates || [], discovery.candidates),
         cdpCandidatesByTab.get(tabId) || [],
       ),
     };
@@ -254,6 +265,56 @@ async function discoverCaptionSources(tabId: number): Promise<CaptionDiscoveryRe
     await updateCaptionState(tabId, 'failed', failure, formatError(error));
     return failure;
   }
+}
+
+async function handleCaptionDiscoveryUpdate(
+  tabId: number,
+  incoming: CaptionDiscoveryResponse,
+): Promise<void> {
+  await captionStateReady;
+  if (
+    incoming.schemaVersion !== 1 ||
+    !Array.isArray(incoming.candidates) ||
+    !Array.isArray(incoming.limitations)
+  ) {
+    console.warn('[Service Worker] Ignored invalid passive caption discovery update.');
+    return;
+  }
+
+  const current = getCaptionState(tabId);
+  const merged: CaptionDiscoveryResponse = {
+    ...incoming,
+    capturedAt: new Date().toISOString(),
+    candidates: mergeCaptionCandidates(
+      tabId,
+      mergePassiveCaptionCandidates(current.discovery?.candidates || [], incoming.candidates),
+      cdpCandidatesByTab.get(tabId) || [],
+    ),
+    limitations: [...new Set([...(current.discovery?.limitations || []), ...incoming.limitations])],
+  };
+  const phase =
+    current.phase === 'idle' || current.phase === 'failed' || current.phase === 'no-match'
+      ? 'non-cdp-complete'
+      : current.phase;
+  await updateCaptionState(tabId, phase, merged, null);
+}
+
+function mergePassiveCaptionCandidates(
+  existing: CaptionSourceCandidate[],
+  incoming: CaptionSourceCandidate[],
+): CaptionSourceCandidate[] {
+  const merged = [...existing];
+  incoming.forEach((candidate) => {
+    const duplicate = merged.some((item) =>
+      item.url && candidate.url
+        ? item.url === candidate.url
+        : item.kind === candidate.kind &&
+          item.videoId === candidate.videoId &&
+          item.nativeTrackIndex === candidate.nativeTrackIndex,
+    );
+    if (!duplicate) merged.push(candidate);
+  });
+  return merged;
 }
 
 function handleSetCaptionCdpMonitoring(
@@ -432,7 +493,18 @@ function mergeCaptionCandidates(
         format: candidate.format,
         confidence: 'high',
         timing: candidate.timing,
-        evidence: [...existing.evidence, ...candidate.evidence],
+        evidence: [
+          ...existing.evidence,
+          ...candidate.evidence.filter(
+            (evidence) =>
+              !existing.evidence.some(
+                (item) =>
+                  item.description === evidence.description &&
+                  item.selector === evidence.selector &&
+                  item.fieldPath === evidence.fieldPath,
+              ),
+          ),
+        ],
       };
     }
   });
@@ -902,7 +974,6 @@ function requestCaptionDiscovery(tabId: number): Promise<CaptionDiscoveryRespons
           resolve(undefined);
           return;
         }
-        captionCandidatesByTab.set(tabId, discovery);
         resolve(discovery);
       });
     } catch {

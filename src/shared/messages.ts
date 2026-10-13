@@ -3,6 +3,7 @@ export type ContentScriptMessage =
   | { type: 'GET_VIDEO_ELEMENTS' }
   | { type: 'GET_CAPTION_DIAGNOSTICS' }
   | { type: 'DISCOVER_CAPTION_SOURCES' }
+  | { type: 'CAPTION_DISCOVERY_UPDATE'; discovery: CaptionDiscoveryResponse }
   | { type: 'RETRIEVE_CAPTION_SOURCE_IN_PAGE'; candidate: CaptionSourceCandidate }
   | { type: 'PLAY_VIDEO'; videoId: string }
   | { type: 'PAUSE_VIDEO'; videoId: string }
@@ -29,7 +30,7 @@ export type PopupMessage =
 
 // Message types sent from background to popup/content script
 export type BackgroundMessage =
-  | { type: 'STATE_UPDATED'; state: ExtensionState }
+  | { type: 'STATE_UPDATED'; state: ExtensionState; tabId?: number }
   | { type: 'CAPTION_STATE_UPDATED'; state: CaptionCaptureState }
   | { type: 'SETTINGS_CHANGED'; settings: ExtensionSettings };
 

@@ -14,6 +14,29 @@ const timedTextPattern =
   /(?:\.vtt(?:$|[?#])|\.webvtt(?:$|[?#])|\.ttml2?(?:$|[?#])|\.dfxp(?:$|[?#])|\.srt(?:$|[?#])|timedtext|caption|subtitle|subtitles|texttrack|\/stpp(?:\/|$)|\/wvtt(?:\/|$))/i;
 const captionKeyPattern = /caption|subtitle|timedtext|texttrack|closed.?caption/i;
 
+export function isLikelyCaptionResourceUrl(url: string): boolean {
+  return timedTextPattern.test(url);
+}
+
+export function createCaptionResourceCandidate(
+  url: string,
+  videoId: string,
+): Omit<CaptionSourceCandidate, 'id'> {
+  return {
+    videoId,
+    kind: 'resource-url',
+    format: detectFormat(url),
+    url,
+    displayUrl: redactUrl(url),
+    confidence: 'low',
+    timing: 'unknown',
+    evidence: [{ description: 'Resource timing entry matched timed-text URL heuristics' }],
+    limitations: [
+      'The resource URL is a heuristic match; its response body has not been inspected.',
+    ],
+  };
+}
+
 export function collectCaptionSourceDiscovery(
   videos: Array<{ id: string; element: HTMLVideoElement }>,
   root: Document = document,
@@ -128,20 +151,8 @@ function collectResourceCandidates(
   const entries = root.defaultView?.performance.getEntriesByType('resource') || [];
   entries.forEach((entry) => {
     const url = (entry as PerformanceResourceTiming).name;
-    if (!timedTextPattern.test(url)) return;
-    addCandidate({
-      videoId,
-      kind: 'resource-url',
-      format: detectFormat(url),
-      url,
-      displayUrl: redactUrl(url),
-      confidence: 'low',
-      timing: 'unknown',
-      evidence: [{ description: 'Resource timing entry matched timed-text URL heuristics' }],
-      limitations: [
-        'The resource URL is a heuristic match; its response body has not been inspected.',
-      ],
-    });
+    if (!isLikelyCaptionResourceUrl(url)) return;
+    addCandidate(createCaptionResourceCandidate(url, videoId));
   });
 }
 
