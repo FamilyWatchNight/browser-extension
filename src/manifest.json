@@ -10,7 +10,8 @@
     "downloads",
     "tabCapture",
     "offscreen",
-    "activeTab"
+    "activeTab",
+    "debugger"
   ],
   "host_permissions": [
     "<all_urls>"

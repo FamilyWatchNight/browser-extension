@@ -14,6 +14,7 @@ describe('content-script lifecycle', () => {
 
   afterEach(() => {
     vi.useRealTimers();
+    vi.unstubAllGlobals();
     vi.resetModules();
     document.body.innerHTML = '';
   });
@@ -89,6 +90,44 @@ describe('content-script lifecycle', () => {
 
     expect(result).toBe(true);
     expect(sendResponse).toHaveBeenCalledWith([]);
+  });
+
+  it('publishes a caption resource discovered after initialization', async () => {
+    let resourceObserverCallback:
+      ((list: { getEntries: () => PerformanceEntry[] }) => void) | undefined;
+    class FakePerformanceObserver {
+      constructor(callback: (list: { getEntries: () => PerformanceEntry[] }) => void) {
+        resourceObserverCallback = callback;
+      }
+      observe = vi.fn();
+      disconnect = vi.fn();
+    }
+    vi.stubGlobal('PerformanceObserver', FakePerformanceObserver);
+    const entries: PerformanceEntry[] = [];
+    vi.spyOn(performance, 'getEntriesByType').mockImplementation(() => entries);
+
+    await import('../../entries/content-script/index');
+    await vi.advanceTimersByTimeAsync(250);
+
+    const captionUrl = 'https://captions.example/api/timedtext?lang=en';
+    entries.push({ name: captionUrl } as PerformanceEntry);
+    resourceObserverCallback?.({ getEntries: () => [entries[0]] });
+    await vi.advanceTimersByTimeAsync(250);
+
+    expect(chromeFixture.sendMessage).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: 'CAPTION_DISCOVERY_UPDATE',
+        discovery: expect.objectContaining({
+          candidates: [
+            expect.objectContaining({
+              kind: 'resource-url',
+              url: captionUrl,
+              format: 'unknown',
+            }),
+          ],
+        }),
+      }),
+    );
   });
 
   it('finds a video added inside an already-observed iframe', async () => {

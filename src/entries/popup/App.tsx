@@ -1,6 +1,14 @@
 import { useCallback, useEffect, useState } from 'react';
 
-import type { ScreenshotBounds, VideoElement } from '../../shared/messages';
+import type {
+  CaptionCaptureState,
+  CaptionDiscoveryResponse,
+  CaptionRetrievalResponse,
+  ExtensionState,
+  ScreenshotBounds,
+  VideoElement,
+} from '../../shared/messages';
+import { exportNormalizedWebVtt } from '../../shared/utils/caption-normalize';
 import { connectToServiceWorker } from '../../shared/utils/extension-api';
 import { useExtensionStore } from '../../state/store';
 
@@ -11,6 +19,17 @@ export default function PopupApp() {
   const [audioCaptureActive, setAudioCaptureActive] = useState(false);
   const [audioCaptureMode, setAudioCaptureMode] = useState<'video' | 'tab' | undefined>();
   const [audioCaptureError, setAudioCaptureError] = useState<string | undefined>();
+  const [captionDiscovery, setCaptionDiscovery] = useState<CaptionDiscoveryResponse>();
+  const [captionCaptureState, setCaptionCaptureState] = useState<CaptionCaptureState>();
+  const [captionRetrievals, setCaptionRetrievals] = useState<
+    Record<string, CaptionRetrievalResponse>
+  >({});
+  const [captionRetrievingIds, setCaptionRetrievingIds] = useState<string[]>([]);
+  const [captionProbeError, setCaptionProbeError] = useState<string | undefined>();
+  const [captionProbeLoading, setCaptionProbeLoading] = useState(false);
+  const [captionRetrievingId, setCaptionRetrievingId] = useState<string | undefined>();
+  const [captionRetrievalErrors, setCaptionRetrievalErrors] = useState<Record<string, string>>({});
+  const [captionCdpActionLoading, setCaptionCdpActionLoading] = useState(false);
   const [, setPort] = useState<chrome.runtime.Port | null>(null);
 
   const updateVideos = useCallback((videos: VideoElement[]) => {
@@ -57,15 +76,42 @@ export default function PopupApp() {
     setPort(newPort);
 
     newPort.postMessage({ type: 'REQUEST_STATE' });
-    newPort.onMessage.addListener((message) => {
+    let activeTabId: number | undefined;
+    const handlePortMessage = (message: {
+      type: string;
+      state: ExtensionState | CaptionCaptureState;
+      tabId?: number;
+    }) => {
       if (message.type === 'STATE_UPDATED') {
-        updateVideos(message.state.videos);
+        if (message.tabId !== undefined && message.tabId === activeTabId) {
+          updateVideos((message.state as ExtensionState).videos);
+        }
+      } else if (
+        message.type === 'CAPTION_STATE_UPDATED' &&
+        activeTabId === (message.state as CaptionCaptureState).tabId
+      ) {
+        const state = message.state as CaptionCaptureState;
+        setCaptionCaptureState(state);
+        setCaptionDiscovery(state.discovery);
+        setCaptionRetrievals(state.retrievals);
+        setCaptionRetrievingIds(state.retrievingCandidateIds);
+        setCaptionProbeLoading(state.phase === 'discovering');
+        setCaptionProbeError(state.error);
       }
-    });
+    };
+    newPort.onMessage.addListener(handlePortMessage);
 
+    void chrome.tabs.query({ active: true, currentWindow: true }).then(([tab]) => {
+      if (!tab.id) return;
+      activeTabId = tab.id;
+      newPort.postMessage({ type: 'REQUEST_CAPTION_STATE', tabId: tab.id });
+    });
     fetchVideoElements();
 
-    return () => newPort.disconnect();
+    return () => {
+      newPort.onMessage.removeListener(handlePortMessage);
+      newPort.disconnect();
+    };
   }, [fetchVideoElements, updateVideos]);
 
   async function controlVideo(action: 'play' | 'pause' | 'skip') {
@@ -133,6 +179,170 @@ export default function PopupApp() {
     } catch (e) {
       console.error('Failed to capture screenshot:', e);
     }
+  }
+
+  async function probeCaptions() {
+    setCaptionProbeLoading(true);
+    setCaptionProbeError(undefined);
+    try {
+      const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+      if (!tab.id) throw new Error('No active tab');
+      let response: unknown;
+      try {
+        response = await chrome.runtime.sendMessage({
+          type: 'DISCOVER_CAPTION_SOURCES',
+          tabId: tab.id,
+        });
+      } catch {
+        response = undefined;
+      }
+      if (!isCaptionDiscoveryResponse(response)) {
+        response = await chrome.tabs.sendMessage(tab.id, { type: 'DISCOVER_CAPTION_SOURCES' });
+      }
+      if (!isCaptionDiscoveryResponse(response)) {
+        throw new Error(`Invalid caption probe response: ${describeResponse(response)}`);
+      }
+      setCaptionDiscovery(response);
+    } catch (error) {
+      setCaptionProbeError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setCaptionProbeLoading(false);
+    }
+  }
+
+  async function setCdpMonitoring(action: 'start' | 'pause' | 'resume') {
+    setCaptionCdpActionLoading(true);
+    setCaptionProbeError(undefined);
+    try {
+      const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+      if (!tab.id) throw new Error('No active tab');
+      const response = await chrome.runtime.sendMessage({
+        type: 'SET_CAPTION_CDP_MONITORING',
+        tabId: tab.id,
+        action,
+      });
+      if (!response || response.success !== true) {
+        throw new Error(response?.error || `Could not ${action} CDP monitoring`);
+      }
+      const state = response.state as CaptionCaptureState;
+      setCaptionCaptureState(state);
+      setCaptionDiscovery(state.discovery);
+      setCaptionRetrievals(state.retrievals);
+      setCaptionRetrievingIds(state.retrievingCandidateIds);
+    } catch (error) {
+      setCaptionProbeError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setCaptionCdpActionLoading(false);
+    }
+  }
+
+  function isCaptionDiscoveryResponse(response: unknown): response is CaptionDiscoveryResponse {
+    return Boolean(
+      response &&
+      typeof response === 'object' &&
+      'schemaVersion' in response &&
+      response.schemaVersion === 1 &&
+      'candidates' in response &&
+      Array.isArray(response.candidates) &&
+      'limitations' in response &&
+      Array.isArray(response.limitations),
+    );
+  }
+
+  function describeResponse(response: unknown): string {
+    if (response === undefined) return 'no response from the extension or content script';
+    if (response === null) return 'null response';
+    if (typeof response !== 'object') return `${typeof response} response`;
+    return `object with keys: ${Object.keys(response).join(', ') || '(none)'}`;
+  }
+
+  async function retrieveCaptions(candidateId: string) {
+    setCaptionRetrievingId(candidateId);
+    setCaptionRetrievalErrors((current) => ({ ...current, [candidateId]: '' }));
+    setCaptionProbeError(undefined);
+    try {
+      const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+      if (!tab.id) throw new Error('No active tab');
+      const candidate = captionDiscovery?.candidates.find((item) => item.id === candidateId);
+      if (!candidate) throw new Error('Caption candidate is no longer available');
+      const response: unknown = await chrome.runtime.sendMessage({
+        type: 'RETRIEVE_CAPTION_SOURCE',
+        tabId: tab.id,
+        candidateId,
+      });
+      if (!isCaptionRetrievalResponse(response)) {
+        throw new Error(`Invalid retrieval response: ${describeResponse(response)}`);
+      }
+      const retrievalResponse = response;
+      setCaptionRetrievals((current) => ({ ...current, [candidateId]: retrievalResponse }));
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      setCaptionRetrievalErrors((current) => ({
+        ...current,
+        [candidateId]: message,
+      }));
+    } finally {
+      setCaptionRetrievingId(undefined);
+    }
+  }
+
+  function isCaptionRetrievalResponse(response: unknown): response is CaptionRetrievalResponse {
+    if (
+      !response ||
+      typeof response !== 'object' ||
+      !('success' in response) ||
+      typeof response.success !== 'boolean' ||
+      !('candidateId' in response) ||
+      typeof response.candidateId !== 'string' ||
+      !('warnings' in response) ||
+      !Array.isArray(response.warnings)
+    ) {
+      return false;
+    }
+    if (response.success) return true;
+    return Boolean(
+      'failure' in response &&
+        response.failure &&
+        typeof response.failure === 'object' &&
+        'category' in response.failure &&
+        typeof response.failure.category === 'string' &&
+        'message' in response.failure &&
+        typeof response.failure.message === 'string',
+    );
+  }
+
+  async function downloadCaptionArtifact(filename: string, payload: string, mimeType: string) {
+    const timestamp = new Date().toISOString().replace(/[.:]/g, '-');
+    const safeFilename = filename.replace(/[^a-z0-9._-]+/gi, '-');
+    await chrome.downloads.download({
+      url: `data:${mimeType};charset=utf-8,${encodeURIComponent(payload)}`,
+      filename: `captions-${timestamp}-${safeFilename}`,
+      conflictAction: 'uniquify',
+      saveAs: false,
+    });
+  }
+
+  async function downloadRawCaptions(retrieval: CaptionRetrievalResponse) {
+    if (!retrieval.raw) return;
+    await downloadCaptionArtifact(
+      `raw-${retrieval.raw.filename}`,
+      retrieval.raw.payload,
+      retrieval.raw.contentType || 'text/plain',
+    );
+  }
+
+  async function downloadNormalizedCaptions(retrieval: CaptionRetrievalResponse) {
+    if (!retrieval.normalized) return;
+    await downloadCaptionArtifact(
+      'normalized.json',
+      JSON.stringify(retrieval.normalized, null, 2),
+      'application/json',
+    );
+    await downloadCaptionArtifact(
+      'normalized.vtt',
+      exportNormalizedWebVtt(retrieval.normalized),
+      'text/vtt',
+    );
   }
 
   async function toggleAudioCapture() {
@@ -298,6 +508,9 @@ export default function PopupApp() {
             <button onClick={captureScreenshot} style={{ padding: '8px' }}>
               📸 Screenshot
             </button>
+            <button onClick={probeCaptions} style={{ padding: '8px' }}>
+              {captionProbeLoading ? 'Finding captions...' : 'Find captions'}
+            </button>
             <button onClick={toggleAudioCapture} style={{ padding: '8px' }}>
               {audioCaptureActive ? '⏹ Stop audio' : '🎙 Record audio'}
             </button>
@@ -323,6 +536,215 @@ export default function PopupApp() {
             </>
           )}
 
+          {captionProbeError && (
+            <div role="alert" style={{ marginTop: '12px', fontSize: '12px', color: '#b91c1c' }}>
+              Caption probe failed: {captionProbeError}
+            </div>
+          )}
+
+          {captionDiscovery && (
+            <section style={{ marginTop: '12px', fontSize: '12px' }}>
+              <strong>Likely caption sources ({captionDiscovery.candidates.length})</strong>
+              <div style={{ marginTop: '4px', color: '#666' }}>
+                Try these sources first. CDP monitoring is a separate step and reloads the tab.
+              </div>
+              {captionCaptureState && (
+                <div role="status" style={{ marginTop: '6px' }}>
+                  {captionCaptureState.phase === 'discovering' &&
+                    'Finding likely caption sources without CDP…'}
+                  {captionCaptureState.phase === 'non-cdp-complete' &&
+                    (captionDiscovery.candidates.length
+                      ? 'Discovery finished. Try retrieving a likely source, or start CDP monitoring if none works.'
+                      : 'No likely source found without CDP. Start CDP monitoring to inspect network responses; this reloads the tab.')}
+                  {captionCaptureState.phase === 'cdp-monitoring' &&
+                    'CDP is actively monitoring network responses after reload. Keep playback going.'}
+                  {captionCaptureState.phase === 'cdp-paused' && 'CDP monitoring is paused.'}
+                  {captionCaptureState.phase === 'complete' &&
+                    'A caption response was captured. Retrieve a likely source below.'}
+                  {captionCaptureState.phase === 'no-match' &&
+                    'CDP monitoring finished without finding a usable caption response.'}
+                  {captionCaptureState.phase === 'failed' && 'Caption discovery or capture failed.'}
+                </div>
+              )}
+              {captionCaptureState?.diagnostics.responsesObserved ? (
+                <div style={{ marginTop: '6px', padding: '6px', backgroundColor: '#f7f7f7' }}>
+                  <strong>Traffic summary:</strong>{' '}
+                  {captionCaptureState.diagnostics.responsesObserved} responses inspected;{' '}
+                  {captionCaptureState.diagnostics.bodiesRead} bodies checked;{' '}
+                  {captionCaptureState.diagnostics.candidatesAccepted} timed-text candidate(s)
+                  accepted.
+                  {Object.keys(captionCaptureState.diagnostics.ignoredByReason).length > 0 && (
+                    <div>
+                      Ignored:{' '}
+                      {Object.entries(captionCaptureState.diagnostics.ignoredByReason)
+                        .map(([reason, count]) => `${formatIgnoredReason(reason)} (${count})`)
+                        .join(', ')}
+                    </div>
+                  )}
+                  {captionCaptureState.diagnostics.bodyReadFailures > 0 && (
+                    <div>
+                      {captionCaptureState.diagnostics.bodyReadFailures} response body read(s)
+                      failed.
+                    </div>
+                  )}
+                </div>
+              ) : null}
+              {captionDiscovery.candidates.map((candidate) => {
+                const retrieval = captionRetrievals[candidate.id];
+                const isRetrieving =
+                  captionRetrievingId === candidate.id ||
+                  captionRetrievingIds.includes(candidate.id);
+                return (
+                  <div
+                    key={candidate.id}
+                    style={{ marginTop: '8px', padding: '8px', backgroundColor: '#f0f0f0' }}
+                  >
+                    <strong>
+                      {candidate.kind} / {candidate.format} /{' '}
+                      {candidate.language || 'language unknown'}
+                    </strong>
+                    <div>
+                      {candidate.confidence} confidence; {candidate.timing} timing
+                    </div>
+                    {candidate.displayUrl && <div>Source: {candidate.displayUrl}</div>}
+                    {candidate.evidence.map((item, index) => (
+                      <div key={`${candidate.id}-evidence-${index}`}>- {item.description}</div>
+                    ))}
+                    <div role={retrieval?.success ? 'status' : undefined}>
+                      {isRetrieving
+                        ? 'Retrieving captions…'
+                        : retrieval?.success
+                          ? 'Captions retrieved successfully.'
+                          : retrieval?.failure
+                            ? `Retrieval failed: ${retrieval.failure.category}`
+                            : 'Not retrieved yet.'}
+                    </div>
+                    {(candidate.limitations || []).map((limitation) => (
+                      <div key={limitation} style={{ color: '#666' }}>
+                        Note: {limitation}
+                      </div>
+                    ))}
+                    <button
+                      onClick={() => retrieveCaptions(candidate.id)}
+                      disabled={
+                        (candidate.kind !== 'native-track' && !candidate.url) || isRetrieving
+                      }
+                      style={{ marginTop: '6px', padding: '4px 8px' }}
+                    >
+                      {isRetrieving
+                        ? 'Retrieving...'
+                        : candidate.kind === 'native-track'
+                          ? 'Retrieve captions'
+                          : 'Fetch captions'}
+                    </button>
+                    {retrieval?.raw && (
+                      <button
+                        onClick={() => downloadRawCaptions(retrieval)}
+                        style={{ margin: '6px 0 0 6px', padding: '4px 8px' }}
+                      >
+                        Download raw ({retrieval.raw.format})
+                      </button>
+                    )}
+                    {retrieval?.normalized && (
+                      <button
+                        onClick={() => downloadNormalizedCaptions(retrieval)}
+                        style={{ margin: '6px 0 0 6px', padding: '4px 8px' }}
+                      >
+                        Download normalized (JSON + WebVTT)
+                      </button>
+                    )}
+                    {retrieval?.failure && (
+                      <div role="alert" style={{ color: '#b91c1c' }}>
+                        {retrieval.failure.category}: {retrieval.failure.message}
+                        {retrieval.failure.diagnostics && (
+                          <div style={{ color: '#7f1d1d', marginTop: '4px' }}>
+                            <div>
+                              Stage: {retrieval.failure.diagnostics.stage.replace(/-/g, ' ')}
+                            </div>
+                            {retrieval.failure.diagnostics.endpoint && (
+                              <div>
+                                Endpoint: {retrieval.failure.diagnostics.endpoint} (query and path
+                                omitted)
+                              </div>
+                            )}
+                            {retrieval.failure.diagnostics.stage === 'request' && (
+                              <div>Request: GET with browser credentials included</div>
+                            )}
+                            {retrieval.failure.diagnostics.httpStatus !== undefined && (
+                              <div>
+                                HTTP status: {retrieval.failure.diagnostics.httpStatus}
+                              </div>
+                            )}
+                            {retrieval.failure.diagnostics.contentType && (
+                              <div>
+                                Response type: {retrieval.failure.diagnostics.contentType}
+                              </div>
+                            )}
+                            {retrieval.failure.diagnostics.responseBytes !== undefined && (
+                              <div>
+                                Response size: {retrieval.failure.diagnostics.responseBytes} bytes
+                              </div>
+                            )}
+                            {retrieval.failure.diagnostics.stage === 'request' && (
+                              <div>
+                                No HTTP response was exposed to the extension; the browser does
+                                not identify whether this was CORS, DNS, TLS, or another network
+                                failure.
+                              </div>
+                            )}
+                          </div>
+                        )}
+                      </div>
+                    )}
+                    {captionRetrievalErrors[candidate.id] && (
+                      <div role="alert" style={{ color: '#b91c1c' }}>
+                        Retrieval failed: {captionRetrievalErrors[candidate.id]}
+                      </div>
+                    )}
+                    {retrieval?.warnings.map((warning) => (
+                      <div key={`${candidate.id}-${warning.code}`} style={{ color: '#666' }}>
+                        Warning: {warning.message}
+                      </div>
+                    ))}
+                  </div>
+                );
+              })}
+              {captionDiscovery.candidates.length === 0 && <div>No caption sources found.</div>}
+              {captionCaptureState?.phase === 'cdp-monitoring' ? (
+                <button
+                  onClick={() => setCdpMonitoring('pause')}
+                  disabled={captionCdpActionLoading}
+                  style={{ marginTop: '8px', padding: '6px 8px' }}
+                >
+                  {captionCdpActionLoading ? 'Pausing…' : 'Pause CDP monitoring'}
+                </button>
+              ) : captionCaptureState?.phase === 'cdp-paused' ? (
+                <button
+                  onClick={() => setCdpMonitoring('resume')}
+                  disabled={captionCdpActionLoading}
+                  style={{ marginTop: '8px', padding: '6px 8px' }}
+                >
+                  {captionCdpActionLoading ? 'Resuming…' : 'Resume CDP monitoring (reload)'}
+                </button>
+              ) : ['non-cdp-complete', 'no-match', 'failed'].includes(
+                  captionCaptureState?.phase || '',
+                ) ? (
+                <button
+                  onClick={() => setCdpMonitoring('start')}
+                  disabled={captionCdpActionLoading}
+                  style={{ marginTop: '8px', padding: '6px 8px' }}
+                >
+                  {captionCdpActionLoading ? 'Starting…' : 'Start CDP monitoring (reload)'}
+                </button>
+              ) : null}
+              {captionDiscovery.limitations.map((limitation) => (
+                <div key={limitation} style={{ marginTop: '4px', color: '#666' }}>
+                  Note: {limitation}
+                </div>
+              ))}
+            </section>
+          )}
+
           <div style={{ marginTop: '12px', fontSize: '12px' }}>
             <p>
               <strong>Note:</strong> Advanced controls via WebSocket coming in phase 2!
@@ -336,4 +758,19 @@ export default function PopupApp() {
       )}
     </div>
   );
+}
+
+function formatIgnoredReason(reason: string): string {
+  switch (reason) {
+    case 'known-non-caption-mime':
+      return 'known binary/media type';
+    case 'unpromising-response':
+      return 'not a likely text response';
+    case 'body-not-timed-caption':
+      return 'body lacked a valid timed-caption signature';
+    case 'response-body-unavailable':
+      return 'response body unavailable';
+    default:
+      return reason;
+  }
 }
