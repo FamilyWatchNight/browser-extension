@@ -1,10 +1,21 @@
 import type {
   ActionResponse,
   AudioCaptureResponse,
+  CaptionDiagnosticsResponse,
+  CaptionDiscoveryResponse,
+  CaptionRetrievalResponse,
   ContentScriptMessage,
   ScreenshotResponse,
   VideoElement,
 } from '../../shared/messages';
+import { collectCaptionDiagnostics } from '../../shared/utils/caption-diagnostics';
+import { collectCaptionSourceDiscovery } from '../../shared/utils/caption-discovery';
+import { detectCaptionFormat, fetchCaptionPayload } from '../../shared/utils/caption-fetch';
+import {
+  exportNormalizedWebVtt,
+  normalizeCaptionPayload,
+  normalizeNativeTrack,
+} from '../../shared/utils/caption-normalize';
 import { findAllVideos } from '../../shared/utils/dom-query';
 import { createVideoElementSnapshot, setupVideoListeners } from '../../shared/utils/video-element';
 
@@ -163,6 +174,20 @@ function registerMessageListener() {
         handleGetVideoElements(sendResponse);
         return true;
 
+      case 'GET_CAPTION_DIAGNOSTICS':
+        refreshDetectedVideos();
+        handleGetCaptionDiagnostics(sendResponse);
+        return true;
+
+      case 'DISCOVER_CAPTION_SOURCES':
+        refreshDetectedVideos();
+        handleDiscoverCaptionSources(sendResponse);
+        return true;
+
+      case 'RETRIEVE_CAPTION_SOURCE_IN_PAGE':
+        handleRetrieveCaptionSourceInPage(message.candidate, sendResponse);
+        return true;
+
       case 'PLAY_VIDEO':
         handlePlayVideo(message.videoId, sendResponse);
         return true;
@@ -203,6 +228,107 @@ function initializeContentScript() {
 
 function handleGetVideoElements(sendResponse: (data: VideoElement[]) => void) {
   sendResponse(getVideoSnapshots());
+}
+
+function handleGetCaptionDiagnostics(sendResponse: (data: CaptionDiagnosticsResponse) => void) {
+  sendResponse(
+    collectCaptionDiagnostics(
+      Array.from(detectedVideos.entries()).map(([id, element]) => ({ id, element })),
+    ),
+  );
+}
+
+function handleDiscoverCaptionSources(sendResponse: (data: CaptionDiscoveryResponse) => void) {
+  sendResponse(
+    collectCaptionSourceDiscovery(
+      Array.from(detectedVideos.entries()).map(([id, element]) => ({ id, element })),
+    ),
+  );
+}
+
+async function handleRetrieveCaptionSourceInPage(
+  candidate: Extract<
+    ContentScriptMessage,
+    { type: 'RETRIEVE_CAPTION_SOURCE_IN_PAGE' }
+  >['candidate'],
+  sendResponse: (data: CaptionRetrievalResponse) => void,
+) {
+  try {
+    const video = detectedVideos.get(candidate.videoId);
+    if (candidate.kind === 'native-track') {
+      if (!video) throw new Error('Video for native caption track is no longer available');
+      await ensureNativeTrackCues(video, candidate.nativeTrackIndex);
+      const normalized = normalizeNativeTrack(video, candidate);
+      sendResponse({
+        success: true,
+        candidateId: candidate.id,
+        raw: {
+          candidateId: candidate.id,
+          format: 'webvtt',
+          filename: 'native-captions.vtt',
+          contentType: 'text/vtt',
+          payload: exportNormalizedWebVtt(normalized),
+          byteLength: new TextEncoder().encode(exportNormalizedWebVtt(normalized)).byteLength,
+        },
+        normalized,
+        warnings: normalized.warnings,
+      });
+      return;
+    }
+    if (!candidate.url) throw new Error('Caption candidate does not expose a fetchable URL.');
+    const fetched = await fetchCaptionPayload(candidate.url);
+    const format = detectCaptionFormat(candidate.url, fetched.contentType, fetched.payload);
+    const extension = format === 'ttml' ? 'ttml2' : format === 'webvtt' ? 'vtt' : format;
+    const raw = {
+      candidateId: candidate.id,
+      format,
+      filename: `captions.${extension === 'unknown' ? 'txt' : extension}`,
+      contentType: fetched.contentType,
+      payload: fetched.payload,
+      byteLength: fetched.byteLength,
+    };
+    const normalized = normalizeCaptionPayload(
+      fetched.payload,
+      { ...candidate, format },
+      {
+        contentType: fetched.contentType,
+        sourceUrl: fetched.finalUrl,
+      },
+    );
+    sendResponse({
+      success: true,
+      candidateId: candidate.id,
+      raw,
+      normalized,
+      warnings: normalized.warnings,
+    });
+  } catch (error) {
+    sendResponse({
+      success: false,
+      candidateId: candidate.id,
+      warnings: [],
+      failure: {
+        category: candidate.kind === 'native-track' ? 'invalid-payload' : 'network',
+        message: error instanceof Error ? error.message : String(error),
+      },
+    });
+  }
+}
+
+async function ensureNativeTrackCues(video: HTMLVideoElement, trackIndex?: number): Promise<void> {
+  if (trackIndex === undefined) throw new Error('Native track index is missing');
+  const trackElement = video.querySelectorAll('track')[trackIndex];
+  const track = trackElement?.track || video.textTracks[trackIndex];
+  if (!track) throw new Error('Native caption track is no longer available');
+  if (track.cues?.length) return;
+
+  track.mode = 'hidden';
+  const deadline = Date.now() + 5_000;
+  while ((!track.cues || track.cues.length === 0) && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  if (!track.cues) throw new Error('Native caption track did not load its cues');
+  if (track.cues.length === 0) throw new Error('Native caption track loaded but contains no cues');
 }
 
 function handlePlayVideo(videoId: string, sendResponse: (data: ActionResponse) => void) {

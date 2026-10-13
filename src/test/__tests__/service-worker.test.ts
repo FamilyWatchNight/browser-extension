@@ -96,4 +96,185 @@ describe('service-worker message contracts', () => {
 
     expect(chromeFixture.port.postMessage).toHaveBeenCalledTimes(initialMessageCount + 1);
   });
+
+  it('keeps caption discovery non-CDP and persists retrieval state for popup restoration', async () => {
+    const candidate = {
+      id: 'caption-source-1',
+      videoId: 'video-1',
+      kind: 'resource-url',
+      format: 'ttml',
+      url: 'https://captions.example/subtitles.ttml',
+      displayUrl: 'https://captions.example/subtitles.ttml',
+      confidence: 'high',
+      timing: 'exact',
+      evidence: [{ description: 'Caption-like URL in page resources.' }],
+    };
+    const discovery = {
+      schemaVersion: 1,
+      capturedAt: new Date().toISOString(),
+      candidates: [candidate],
+      limitations: [],
+    };
+    const retrieval = {
+      success: true,
+      candidateId: candidate.id,
+      raw: {
+        candidateId: candidate.id,
+        format: 'ttml',
+        filename: 'captions.ttml2',
+        payload: '<tt><body>caption</body></tt>',
+        byteLength: 29,
+      },
+      warnings: [],
+    };
+    chromeFixture.chrome.tabs.sendMessage = vi.fn((_tabId, message, callback) => {
+      callback(message.type === 'DISCOVER_CAPTION_SOURCES' ? discovery : retrieval);
+    });
+
+    await import('../../entries/background/service-worker');
+    chromeFixture.connectListeners[0](chromeFixture.port);
+
+    const discoveryResponse = vi.fn();
+    chromeFixture.messageListeners[0](
+      { type: 'DISCOVER_CAPTION_SOURCES', tabId: 42 },
+      {},
+      discoveryResponse,
+    );
+    await vi.waitFor(() =>
+      expect(discoveryResponse).toHaveBeenCalledWith(
+        expect.objectContaining({ schemaVersion: 1, candidates: [candidate] }),
+      ),
+    );
+    expect(chromeFixture.chrome.tabs.reload).not.toHaveBeenCalled();
+    expect(chromeFixture.port.postMessage).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        type: 'CAPTION_STATE_UPDATED',
+        state: expect.objectContaining({ tabId: 42, phase: 'non-cdp-complete' }),
+      }),
+    );
+
+    const retrievalResponse = vi.fn();
+    chromeFixture.messageListeners[0](
+      { type: 'RETRIEVE_CAPTION_SOURCE', tabId: 42, candidateId: candidate.id },
+      {},
+      retrievalResponse,
+    );
+    await vi.waitFor(() => expect(retrievalResponse).toHaveBeenCalledWith(retrieval));
+    await vi.waitFor(() =>
+      expect(chromeFixture.sessionStorage.captionCaptureStates).toEqual(
+        expect.objectContaining({
+          '42': expect.objectContaining({
+            phase: 'non-cdp-complete',
+            retrievals: { [candidate.id]: retrieval },
+          }),
+        }),
+      ),
+    );
+
+    vi.resetModules();
+    await import('../../entries/background/service-worker');
+    chromeFixture.connectListeners[chromeFixture.connectListeners.length - 1]?.(chromeFixture.port);
+    chromeFixture.portMessageListeners[chromeFixture.portMessageListeners.length - 1]?.({
+      type: 'REQUEST_CAPTION_STATE',
+      tabId: 42,
+    });
+
+    await vi.waitFor(() =>
+      expect(chromeFixture.port.postMessage).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: 'CAPTION_STATE_UPDATED',
+          state: expect.objectContaining({
+            tabId: 42,
+            phase: 'non-cdp-complete',
+            retrievals: { [candidate.id]: retrieval },
+          }),
+        }),
+      ),
+    );
+  });
+
+  it('publishes validated CDP candidates while monitoring is still active', async () => {
+    const discovery = {
+      schemaVersion: 1,
+      capturedAt: new Date().toISOString(),
+      candidates: [],
+      limitations: [],
+    };
+    chromeFixture.chrome.tabs.sendMessage = vi.fn((_tabId, _message, callback) => {
+      callback(discovery);
+    });
+
+    await import('../../entries/background/service-worker');
+    chromeFixture.connectListeners[0](chromeFixture.port);
+
+    const discoveryResponse = vi.fn();
+    chromeFixture.messageListeners[0](
+      { type: 'DISCOVER_CAPTION_SOURCES', tabId: 42 },
+      {},
+      discoveryResponse,
+    );
+    await vi.waitFor(() => expect(discoveryResponse).toHaveBeenCalled());
+
+    const startResponse = vi.fn();
+    chromeFixture.messageListeners[0](
+      { type: 'SET_CAPTION_CDP_MONITORING', tabId: 42, action: 'start' },
+      {},
+      startResponse,
+    );
+    await vi.waitFor(() => expect(startResponse).toHaveBeenCalledWith(expect.objectContaining({ success: true })));
+    await vi.waitFor(() => expect(chromeFixture.debuggerEventListeners).toHaveLength(1));
+
+    const [onDebuggerEvent] = chromeFixture.debuggerEventListeners;
+    onDebuggerEvent(
+      { tabId: 42 },
+      'Network.responseReceived',
+      {
+        requestId: 'caption-request',
+        type: 'XHR',
+        response: {
+          url: 'data:application/json;base64,private-caption-payload',
+          mimeType: 'text/plain',
+        },
+      },
+    );
+    onDebuggerEvent({ tabId: 42 }, 'Network.loadingFinished', { requestId: 'caption-request' });
+
+    await vi.waitFor(() =>
+      expect(chromeFixture.port.postMessage).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: 'CAPTION_STATE_UPDATED',
+          state: expect.objectContaining({
+            phase: 'cdp-monitoring',
+            diagnostics: expect.objectContaining({
+              responsesObserved: 1,
+              bodiesRead: 1,
+              candidatesAccepted: 1,
+            }),
+            discovery: expect.objectContaining({
+              candidates: [
+                expect.objectContaining({
+                  format: 'srt',
+                  confidence: 'high',
+                  url: 'data:application/json;[payload omitted]',
+                }),
+              ],
+            }),
+          }),
+        }),
+      ),
+    );
+    await vi.waitFor(() =>
+      expect(JSON.stringify(chromeFixture.sessionStorage.captionCaptureStates)).not.toContain(
+        'private-caption-payload',
+      ),
+    );
+
+    const pauseResponse = vi.fn();
+    chromeFixture.messageListeners[0](
+      { type: 'SET_CAPTION_CDP_MONITORING', tabId: 42, action: 'pause' },
+      {},
+      pauseResponse,
+    );
+    await vi.waitFor(() => expect(pauseResponse).toHaveBeenCalledWith(expect.objectContaining({ success: true })));
+  });
 });

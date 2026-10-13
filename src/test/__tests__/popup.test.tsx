@@ -235,4 +235,84 @@ describe('popup video discovery', () => {
       seekTime: 37,
     });
   });
+
+  it('updates the visible caption phase and candidate result from background state', async () => {
+    chromeFixture.chrome.tabs.sendMessage = vi.fn().mockResolvedValue([
+      {
+        id: 'video-1',
+        src: 'video.mp4',
+        title: 'Video',
+        duration: 10,
+        currentTime: 0,
+        paused: true,
+        frameIndex: 0,
+      },
+    ]);
+    render(<PopupApp />);
+    await vi.waitFor(() =>
+      expect(chromeFixture.port.postMessage).toHaveBeenCalledWith({
+        type: 'REQUEST_CAPTION_STATE',
+        tabId: 1,
+      }),
+    );
+    const candidate = {
+      id: 'caption-source-1',
+      videoId: 'video-1',
+      kind: 'resource-url' as const,
+      format: 'ttml' as const,
+      url: 'https://captions.example/subtitles.ttml',
+      displayUrl: 'https://captions.example/subtitles.ttml',
+      confidence: 'high' as const,
+      timing: 'exact' as const,
+      evidence: [{ description: 'Caption-like URL in page resources.' }],
+    };
+    const retrieval = {
+      success: true,
+      candidateId: candidate.id,
+      raw: {
+        candidateId: candidate.id,
+        format: 'ttml' as const,
+        filename: 'captions.ttml2',
+        payload: '<tt><body>caption</body></tt>',
+        byteLength: 29,
+      },
+      warnings: [],
+    };
+
+    await act(async () => {
+      chromeFixture.portMessageListeners[0]({
+        type: 'CAPTION_STATE_UPDATED',
+        state: {
+          tabId: 1,
+          phase: 'cdp-monitoring',
+          discovery: {
+            schemaVersion: 1,
+            capturedAt: new Date().toISOString(),
+            candidates: [candidate],
+            limitations: [],
+          },
+          retrievals: { [candidate.id]: retrieval },
+          retrievingCandidateIds: [],
+          diagnostics: {
+            responsesObserved: 7,
+            bodiesRead: 2,
+            bodyReadFailures: 1,
+            candidatesAccepted: 1,
+            ignoredByReason: { 'known-non-caption-mime': 4 },
+          },
+          updatedAt: new Date().toISOString(),
+        },
+      });
+      await Promise.resolve();
+    });
+
+    expect(screen.getByText('CDP is actively monitoring network responses after reload. Keep playback going.')).toBeTruthy();
+    expect(screen.getByText('Captions retrieved successfully.')).toBeTruthy();
+    expect(screen.getByText('Traffic summary:').parentElement?.textContent).toContain(
+      '7 responses inspected; 2 bodies checked; 1 timed-text candidate(s) accepted.',
+    );
+    expect(screen.getByText('Ignored: known binary/media type (4)')).toBeTruthy();
+    expect(screen.getByText('1 response body read(s) failed.')).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Pause CDP monitoring' })).toBeTruthy();
+  });
 });

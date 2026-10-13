@@ -1,6 +1,9 @@
 // Message types sent from content script to background
 export type ContentScriptMessage =
   | { type: 'GET_VIDEO_ELEMENTS' }
+  | { type: 'GET_CAPTION_DIAGNOSTICS' }
+  | { type: 'DISCOVER_CAPTION_SOURCES' }
+  | { type: 'RETRIEVE_CAPTION_SOURCE_IN_PAGE'; candidate: CaptionSourceCandidate }
   | { type: 'PLAY_VIDEO'; videoId: string }
   | { type: 'PAUSE_VIDEO'; videoId: string }
   | { type: 'MOVE_PLAYHEAD'; videoId: string; seekTime: number }
@@ -13,12 +16,21 @@ export type ContentScriptMessage =
 export type PopupMessage =
   | { type: 'UPDATE_SETTINGS'; settings: ExtensionSettings }
   | { type: 'REQUEST_STATE' }
+  | { type: 'REQUEST_CAPTION_STATE'; tabId: number }
+  | { type: 'DISCOVER_CAPTION_SOURCES'; tabId: number }
+  | {
+      type: 'SET_CAPTION_CDP_MONITORING';
+      tabId: number;
+      action: 'start' | 'pause' | 'resume';
+    }
+  | { type: 'RETRIEVE_CAPTION_SOURCE'; tabId: number; candidateId: string }
   | { type: 'START_TAB_AUDIO_CAPTURE'; tabId: number }
   | { type: 'STOP_TAB_AUDIO_CAPTURE' };
 
 // Message types sent from background to popup/content script
 export type BackgroundMessage =
   | { type: 'STATE_UPDATED'; state: ExtensionState }
+  | { type: 'CAPTION_STATE_UPDATED'; state: CaptionCaptureState }
   | { type: 'SETTINGS_CHANGED'; settings: ExtensionSettings };
 
 // Types for video elements detected
@@ -58,6 +70,234 @@ export interface AudioCaptureResponse extends ActionResponse {
   mimeType?: string;
 }
 
+export type CaptionDiagnosticClassification =
+  'native-track' | 'dom-overlay' | 'player-control' | 'unknown' | 'inaccessible';
+
+export interface CaptionDiagnosticTrack {
+  kind: string;
+  label: string;
+  language: string;
+  mode: TextTrackMode;
+  readyState: number;
+  source: string;
+  cueCount?: number;
+}
+
+export interface CaptionDiagnosticEvidence {
+  type: 'native-track' | 'dom-overlay' | 'player-control' | 'limitation';
+  description: string;
+  selector?: string;
+}
+
+export interface VideoCaptionDiagnostics {
+  videoId: string;
+  title: string;
+  classification: CaptionDiagnosticClassification;
+  tracks: CaptionDiagnosticTrack[];
+  evidence: CaptionDiagnosticEvidence[];
+  limitations: string[];
+}
+
+export interface CaptionDiagnosticsResponse {
+  capturedAt: string;
+  videos: VideoCaptionDiagnostics[];
+  pageEvidence: CaptionDiagnosticEvidence[];
+  limitations: string[];
+}
+
+export type CaptionSourceKind =
+  'native-track' | 'resource-url' | 'provider-data' | 'manifest' | 'dom-sample' | 'manual';
+
+export type CaptionSourceFormat = 'webvtt' | 'ttml' | 'srt' | 'json' | 'unknown';
+
+export type CaptionConfidence = 'high' | 'medium' | 'low';
+
+export type CaptionTimingKind = 'exact' | 'sampled' | 'inferred' | 'unknown';
+
+export type CaptionFailureCategory =
+  | 'unsupported-format'
+  | 'network'
+  | 'cors'
+  | 'auth'
+  | 'size-limit'
+  | 'timeout'
+  | 'invalid-payload'
+  | 'inaccessible';
+
+export interface CaptionSourceEvidence {
+  description: string;
+  selector?: string;
+  fieldPath?: string;
+}
+
+export interface CaptionSourceCandidate {
+  id: string;
+  videoId: string;
+  nativeTrackIndex?: number;
+  kind: CaptionSourceKind;
+  format: CaptionSourceFormat;
+  url?: string;
+  displayUrl?: string;
+  language?: string;
+  label?: string;
+  confidence: CaptionConfidence;
+  timing: CaptionTimingKind;
+  evidence: CaptionSourceEvidence[];
+  limitations?: string[];
+}
+
+export interface CaptionDiscoveryResponse {
+  schemaVersion: 1;
+  capturedAt: string;
+  pageUrl?: string;
+  provider?: string;
+  candidates: CaptionSourceCandidate[];
+  limitations: string[];
+}
+
+export type CaptionCapturePhase =
+  | 'idle'
+  | 'discovering'
+  | 'non-cdp-complete'
+  | 'cdp-monitoring'
+  | 'cdp-paused'
+  | 'complete'
+  | 'no-match'
+  | 'failed';
+
+export interface CaptionCaptureState {
+  tabId: number;
+  phase: CaptionCapturePhase;
+  discovery?: CaptionDiscoveryResponse;
+  retrievals: Record<string, CaptionRetrievalResponse>;
+  retrievingCandidateIds: string[];
+  diagnostics: CaptionCaptureDiagnostics;
+  error?: string;
+  updatedAt: string;
+}
+
+export interface CaptionCaptureDiagnostics {
+  responsesObserved: number;
+  bodiesRead: number;
+  bodyReadFailures: number;
+  candidatesAccepted: number;
+  ignoredByReason: Record<string, number>;
+}
+
+export interface CaptionRetrievalRequest {
+  tabId: number;
+  candidateId: string;
+}
+
+export interface CaptionWarning {
+  code: string;
+  message: string;
+  cueId?: string;
+  field?: string;
+}
+
+export interface CaptionSpan {
+  text: string;
+  speaker?: string;
+  voice?: string;
+  italic?: boolean;
+  bold?: boolean;
+  underline?: boolean;
+  className?: string;
+}
+
+export interface CaptionCueSettings {
+  line?: string;
+  position?: string;
+  size?: string;
+  align?: string;
+  vertical?: string;
+  region?: string;
+}
+
+export interface CaptionCue {
+  id: string;
+  start: number;
+  end: number;
+  text: string;
+  spans?: CaptionSpan[];
+  settings?: CaptionCueSettings;
+  speaker?: string;
+  voice?: string;
+  language?: string;
+  confidence: CaptionConfidence;
+  originalTiming?: { start: string; end: string };
+}
+
+export interface CaptionStyle {
+  id: string;
+  foreground?: string;
+  background?: string;
+  fontFamily?: string;
+  fontSize?: string;
+  fontStyle?: string;
+  fontWeight?: string;
+  textAlign?: string;
+  position?: string;
+}
+
+export interface CaptionProvenance {
+  sourceKind: CaptionSourceKind;
+  sourceFormat: CaptionSourceFormat;
+  pageUrl?: string;
+  sourceUrl?: string;
+  provider?: string;
+  language?: string;
+  label?: string;
+  retrievedAt: string;
+  contentType?: string;
+  authentication: 'not-needed' | 'session' | 'unknown' | 'failed';
+}
+
+export interface CaptionUncertainty {
+  confidence: CaptionConfidence;
+  timing: CaptionTimingKind;
+  inferredFields: string[];
+  omittedFeatures: string[];
+  limitations: string[];
+}
+
+export interface NormalizedCaptionDocument {
+  schemaVersion: 1;
+  documentId: string;
+  language?: string;
+  languageConfidence?: CaptionConfidence;
+  title?: string;
+  duration?: number;
+  capturedAt: string;
+  cues: CaptionCue[];
+  styles?: CaptionStyle[];
+  source: CaptionProvenance;
+  uncertainty: CaptionUncertainty;
+  warnings: CaptionWarning[];
+}
+
+export interface RawCaptionArtifact {
+  candidateId: string;
+  format: CaptionSourceFormat;
+  filename: string;
+  contentType?: string;
+  payload: string;
+  byteLength: number;
+}
+
+export interface CaptionRetrievalResponse {
+  success: boolean;
+  candidateId: string;
+  raw?: RawCaptionArtifact;
+  normalized?: NormalizedCaptionDocument;
+  warnings: CaptionWarning[];
+  failure?: {
+    category: CaptionFailureCategory;
+    message: string;
+  };
+}
+
 export interface ScreenshotBounds {
   x: number;
   y: number;
@@ -83,16 +323,22 @@ export type MessageResponse<T extends ContentScriptMessage | PopupMessage> = T e
   type: 'GET_VIDEO_ELEMENTS';
 }
   ? VideoElement[]
-  : T extends { type: 'REQUEST_STATE' }
-    ? ExtensionState
-    : T extends { type: 'UPDATE_SETTINGS' }
-      ? { success: boolean }
-      : T extends { type: 'PLAY_VIDEO' | 'PAUSE_VIDEO' | 'MOVE_PLAYHEAD' }
-        ? { success: boolean }
-        : T extends { type: 'CAPTURE_SCREENSHOT' }
-          ? { success: boolean; data?: string }
-          : T extends { type: 'START_AUDIO_CAPTURE' | 'STOP_AUDIO_CAPTURE' }
-            ? AudioCaptureResponse
-            : T extends { type: 'START_TAB_AUDIO_CAPTURE' | 'STOP_TAB_AUDIO_CAPTURE' }
-              ? AudioCaptureResponse
-              : never;
+  : T extends { type: 'GET_CAPTION_DIAGNOSTICS' }
+    ? CaptionDiagnosticsResponse
+    : T extends { type: 'DISCOVER_CAPTION_SOURCES' }
+      ? CaptionDiscoveryResponse
+      : T extends { type: 'RETRIEVE_CAPTION_SOURCE' }
+        ? CaptionRetrievalResponse
+        : T extends { type: 'REQUEST_STATE' }
+          ? ExtensionState
+          : T extends { type: 'UPDATE_SETTINGS' }
+            ? { success: boolean }
+            : T extends { type: 'PLAY_VIDEO' | 'PAUSE_VIDEO' | 'MOVE_PLAYHEAD' }
+              ? { success: boolean }
+              : T extends { type: 'CAPTURE_SCREENSHOT' }
+                ? { success: boolean; data?: string }
+                : T extends { type: 'START_AUDIO_CAPTURE' | 'STOP_AUDIO_CAPTURE' }
+                  ? AudioCaptureResponse
+                  : T extends { type: 'START_TAB_AUDIO_CAPTURE' | 'STOP_TAB_AUDIO_CAPTURE' }
+                    ? AudioCaptureResponse
+                    : never;
