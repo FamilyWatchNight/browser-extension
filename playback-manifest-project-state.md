@@ -67,6 +67,127 @@ without claiming causality from correlation alone.
 - Pluto exposes a Shaka `TextTrack` whose cue list changes during playback.
   Snapshots suggest a moving cue window; reading the track only once may miss
   earlier cues.
+- A Pluto Playback Trace ran for 3 minutes 46 seconds while its small preview
+  video was already playing. The user clicked Play after tracing began; there
+  were no preroll ads, and the movie began after a short buffering period.
+  The video element first reported an epoch-like media time with zero
+  duration, then reset through `emptied`/`loadstart`; the movie subsequently
+  reported a stable duration of 8,577.388 seconds. This is consistent with
+  the preview and movie being different playback states, but the trace does
+  not identify the preview stream's role.
+- In the Pluto trace, two trusted clicks on caption-setting controls were
+  recorded with the movie at about 29.9 seconds and caused no seek. At about
+  66 seconds, a trusted click on the timeline sought from about 54 seconds to
+  5,992 seconds (about 1:39:52). The player then showed the user-observed
+  multi-ad break; Pluto's UI displayed per-ad progress and a pod-wide
+  remaining-time countdown, indicating that it knew a total for the ad
+  collection when the break began.
+- Around that timeline seek and reported ad break, the trace recorded a
+  cluster of ad measurement/tracking requests to multiple ad-tech endpoints.
+  Caption requests also switched from the initial DASH path range to other
+  ranges: a later fragment in one range and initialization/first fragments in
+  another were requested near the seek, followed by later caption fragments
+  during the break and after the player repositioned. This shows timed-text
+  requests continue around the ad transition and that the fetched segment
+  sequence/ranges change. Since the trace retains request metadata only, it
+  cannot establish whether those captions are for program content, ads, or
+  both.
+- The Pluto player time advanced from about 5,992 seconds after the user seek
+  to about 6,142.8 seconds near the end of the captured ad run. At about
+  218 seconds elapsed, it then emitted another `seeking`/`seeked` transition
+  to about 6,444.1 seconds, without a corresponding page click. No duration
+  change was recorded. This automatic ~301-second media-time jump is evidence
+  of a discontinuity or reposition around the post-ad transition; its cause
+  and whether this media clock represents stitched time or program time
+  remain unknown. The user's hypothesis is that the timeline click targeted a
+  later content position but Pluto first sought to the ad breakpoint at 5,992,
+  played the approximately 145-second pod (the clock advanced about 151
+  seconds to 6,142.8), then automatically sought to 6,444.1, the content
+  position corresponding to the user's click after the scheduled break. The
+  observed order and elapsed/media-time differences are consistent with that
+  explanation, but the click event has no requested target time and the trace
+  does not reveal Pluto's timeline mapping; treat this as a plausible
+  hypothesis, not a confirmed interpretation.
+- The Pluto player requested its stitched DASH `main.mpd`, which returned
+  HTTP 200 as `application/dash+xml`. The transfer encoded size was about
+  39 KB, but the decoded response exceeded the 256 KiB per-manifest
+  retention limit, so the trace records `manifest_capture_skipped` and
+  retains no MPD body. Thus this run confirms the manifest's existence but
+  not its periods, ad markers, or timing structure. The observed duration
+  remained 8,577.388 seconds through the ad break.
+- A second Pluto trace was started without refreshing the page. A video was
+  already present at about 27.3 seconds; the user's Play click was followed
+  by `emptied`/`loadstart`, a reset to zero, and playback startup. The
+  8,577.511-second movie duration and its MPD were captured after that
+  transition. The user did not open the caption controls in this run, so the
+  trace provides no evidence about whether captions were enabled or displayed.
+- The second Pluto trace retained the sanitized 270,781-byte static DASH MPD
+  under the new 1 MiB per-document limit. Its 82 Period durations sum to the
+  declared 8,577.511-second presentation duration. Sixty-nine short periods
+  carry the same `InbandEventStream` descriptor (its `schemeIdUri` is
+  currently redacted, with `value="999"` retained); they total 1,649.545
+  seconds. The other 13 periods total 6,927.966 seconds and include the long
+  program portions. Text/caption AdaptationSets occur in the long periods
+  without that descriptor, not in the short periods with it. Here, “marked”
+  and “unmarked” are informal shorthand for the presence or absence of this
+  descriptor; they are not DASH terms, and a DASH Period is not inherently an
+  ad or a movie segment. Under the working assumption that descriptor-bearing
+  periods are ad segments, they form 11 contiguous runs that are plausible ad
+  pods. A run consists of several marked Periods and lasts about 150 seconds;
+  it should not be described as one individual ad. The descriptor's
+  identifying scheme is hidden by URL sanitization, so its ad semantics are
+  not yet independently verified.
+- If those 11 runs are treated as ad pods and the remaining periods as
+  program, the static MPD is sufficient to calculate their expected
+  presentation-timeline placement and duration from each Period's `start`
+  and `duration`. The schedule below uses elapsed `HH:MM:SS.sss` offsets from
+  the start of the MPD presentation, which includes earlier ad time. This is
+  now the working hypothesis for investigation: the repeated descriptor
+  distinguishes ad-serving periods, and each contiguous run is one pod. The
+  extension's intended analysis needs pod-level boundaries and duration, not
+  identification or parsing of individual ads within a pod:
+
+  | Candidate pod | Starts at | Scheduled duration |
+  | --- | ---: | ---: |
+  | 1 | 00:20:25.800 | 150.757 s |
+  | 2 | 00:31:22.124 | 150.159 s |
+  | 3 | 00:41:24.316 | 146.189 s |
+  | 4 | 00:54:08.605 | 150.331 s |
+  | 5 | 01:05:08.603 | 150.621 s |
+  | 6 | 01:15:33.824 | 150.294 s |
+  | 7 | 01:25:23.718 | 150.322 s |
+  | 8 | 01:39:53.040 | 150.096 s |
+  | 9 | 01:49:56.336 | 150.392 s |
+  | 10 | 02:03:35.228 | 150.058 s |
+  | 11 | 02:14:05.252 | 150.326 s |
+
+  Together, those runs total 1,649.545 seconds (27:29.545) of scheduled
+  candidate pod time within the 8,577.511-second (2:22:57.511) presentation.
+  This is the schedule encoded by this captured MPD under the working
+  hypothesis, not a guarantee that every pod or ad will be served or played
+  in a later session.
+- At elapsed 106.17 seconds, the user's timeline click was followed by a
+  seek to media time 7,415 seconds. The MPD has a marked period boundary at
+  7,415.228 seconds, only about 0.23 seconds later. Seven consecutive
+  marked periods span 7,415.228-7,565.286, totaling 150.058 seconds, after
+  which an unmarked program period begins. Near elapsed 259.46 seconds, the
+  player automatically sought from 7,565.641 seconds—about 0.36 seconds
+  into that post-ad program period—to 7,797.364 seconds. That transition
+  occurred about 150.7 seconds after the user seek completed. The alignment
+  of click/seek, marked-period start, ad-pod duration, and post-ad boundary
+  strongly supports the hypothesis that Pluto first snaps a late timeline
+  seek to the ad breakpoint, plays the scheduled pod, then jumps forward to
+  the intended content location. The exact intended click target is not
+  captured, so this remains a well-supported hypothesis rather than proof.
+- Caption requests in the second trace used the long program-period ranges:
+  the pre-break range's late fragment was requested near the timeline click,
+  a following range's initialization/first fragment was requested as the
+  ad break began, and later fragments were requested around the automatic
+  post-ad seek. This is consistent with the MPD's caption tracks being tied
+  to program periods, potentially including prefetching across the break.
+  No caption track appears in the marked ad periods, but this alone cannot
+  establish whether ads had separately rendered captions or whether any
+  captions were visible.
 - One Amazon playback trace captured a visible ad break and direct
   ad-specific network evidence. A trusted page click was followed by an
   Amazon ad-decision request, separate DASH manifests on an ad-delivery host
@@ -171,11 +292,12 @@ without claiming causality from correlation alone.
 
 ### Unknown
 
-- Which manifest or playlist formats and variants are used by each service
-  during target playback sessions. Candidate manifest body capture has been
-  live-validated on Amazon; it remains unverified on other providers.
-- Whether Pluto's startup manifest can be observed and how its subtitle
-  fragments are described or timed.
+- The exact semantics of Pluto's repeated `InbandEventStream` descriptor on
+  short periods. Its `schemeIdUri` is redacted in the retained MPD; determine
+  whether this is an ad marker and whether any event payload adds details.
+- Whether the Pluto caption fragments requested around the seek/ad sequence
+  contain cues for ads, program content, or both, and how their source
+  timestamps map to the player timeline.
 - Whether ad boundaries are explicitly signaled, represented as separate
   periods/playlists, inferred by the player, or absent from the observable
   manifest.
@@ -184,8 +306,10 @@ without claiming causality from correlation alone.
 - Whether the observed Pluto subtitle fragments can be assembled into a
   complete, correctly timed caption track, and how to avoid gaps or duplicate
   cues.
-- Which findings generalize across services versus requiring provider-specific
-  adapters.
+- - Which findings generalize across services versus requiring provider-specific
+  adapters. Amazon and Pluto both use DASH in the observed sessions, but
+  Amazon's separately requested interstitial MPDs and Pluto's stitched
+  `main.mpd` endpoint suggest different observable ad-delivery shapes.
 - What the Amazon ad MPDs say about period boundaries, media timestamps, and
   the relationship between the seven observed manifest URLs and the
   user-visible ad sequence.
@@ -303,7 +427,7 @@ the formats that need support.
 5. **Inspect candidate bodies structurally.** The trace retains only bodies
    whose text validates as a DASH MPD or HLS playlist, strips resource
    references and DRM/license elements, rejects DTD/entity declarations, and
-   limits each manifest to 256 KiB and all retained manifest text to a 2 MiB
+   limits each manifest to 1 MiB and all retained manifest text to a 2 MiB
    sub-budget. Inspect the
    exported, sanitized structure for format, timing relationships, periods,
    and ad markers. Do not save full signed URLs, credentials, or media or
@@ -370,12 +494,11 @@ network dumps by default.
     after the first click. Compare that with the explicit reload performed by
     caption CDP retrieval; do not add another-click or automatic-reload behavior
     until the path causing this discrepancy is identified.
-- On Pluto, observe an early playback session and determine whether the
-  startup manifest can be captured; inspect its structure and the relationship
-  between its subtitle references and the observed `text/en-cc/*.m4s`
-  responses.
-- Observe a visible ad transition on Pluto and compare the timeline and
-  caption requests before, during, and after it.
+- Increase or restructure bounded manifest inspection for Pluto's
+  `main.mpd`, which exceeded the current per-document limit. Preserve the
+  overall body budget, sanitization, and URL/DRM redaction.
+- Inspect how the Pluto manifest's periods and subtitle references relate to
+  the observed `text/en-cc/*.m4s` requests and the post-ad media-time jump.
 - Select one of the already-working caption services for comparison and
   collect the same manifest/timeline evidence categories.
 - Based on these results, decide what a minimal shared representation must
@@ -383,9 +506,10 @@ network dumps by default.
 
 ## Playback Trace implementation status
 
-**Implemented as a bounded metadata plus sanitized-manifest trace; initial
-live validation on Amazon, with DRM sanitization tightened after inspecting
-the first captured MPDs; other platforms remain unverified in Chrome.**
+**Implemented as a bounded metadata plus sanitized-manifest trace; live
+validated on Amazon and exercised on Pluto. Pluto's stitched MPD exceeds the
+current per-document body-retention limit; other platforms remain unverified
+in Chrome.**
 
 - The popup offers **Start Playback Trace** even when it has found no video.
   The background attaches CDP Network monitoring without reloading the tab;
@@ -413,7 +537,7 @@ the first captured MPDs; other platforms remain unverified in Chrome.**
   finalization path as manual Stop. A debugger detach is recorded as a failed
   trace rather than a successful completion.
 - Pilot caps are 8 MiB of serialized event records, 50,000 stored event
-  records, a 2 MiB retained-manifest-text sub-budget, and a 256 KiB per
+  records, a 2 MiB retained-manifest-text sub-budget, and a 1 MiB per
   manifest limit. At 75%, the trace warns; duplicate
   network request/response records can be coalesced within a 30-second window
   while retaining repeat count. Routine time samples are already thinned.
@@ -423,8 +547,11 @@ Focused automated coverage verifies URL redaction, cap calculations,
 pre-video popup availability, network metadata recording, event export,
 150-minute alarm finalization, manifest validation/sanitization, body capture,
 and video/seek/page-click event collection. The third and fourth Amazon traces
-confirm manifest body retrieval and local export work in Chrome for this
-provider; other platforms and a full unattended movie run remain untested.
+confirm manifest body retrieval and local export work in Chrome for Amazon;
+the earlier Pluto trace confirmed startup-manifest metadata capture but
+exceeded the former 256 KiB per-document limit. The second Pluto trace confirms
+the new 1 MiB ceiling retains the sanitized 270,781-byte MPD. Other platforms
+and a full unattended movie run remain untested.
 A first Amazon trace did complete and export after a manually stopped
 4-minute-26-second run; it contained 1,161 events and about 311 KB of
 serialized event data, with no response bodies. It captured the ad-decision
@@ -454,26 +581,31 @@ a visible marker/request is not proof that an ad was delivered. This remains
 strong evidence from one title, not a general cross-service normalization
 rule.
 
-The next experiment should be a before/during/after Playback Trace on Pluto,
-preferably while also observing its known caption-segment requests or native
-caption cues. Pluto is the highest-value next step because it can test whether
-the trace captures a second provider's manifest format and ad-boundary
-signals, while directly connecting the original caption-timing question to
-ad transitions. Arm before playback; note whether the opening ad is visible,
-and capture one later transition if practical. Compare manifest/playlist
-structure, video duration and media time, ad-related requests, and subtitle
-segment/cue activity; distinguish a marked or requested break from an ad
-whose media is actually fetched or played. Avoid trying to force a complete
-cross-platform model from a single run.
+The Pluto run has now broadened the evidence beyond Amazon. Its captured
+stitched MPD strongly supports the user's breakpoint-then-resume hypothesis:
+the timeline seek lands within a fraction of a second of a marked-period
+boundary, the marked periods there total about 150 seconds, and playback
+automatically jumps forward from just beyond the following program-period
+boundary about as that pod ends. The requested destination time is not
+captured, so the mapping from the clicked timeline coordinate to resumed
+content position remains to be tested.
 
-The Amazon evidence is already strong enough to justify broadening the sample:
-the two content MPDs on either side of the visible break sum to the clean
-76-minute program baseline, and captured interstitial durations closely
-account for inserted time. Further Amazon work is still useful, but can be a
-targeted follow-up if Pluto leaves a question that Amazon can answer—for
-example, parsing sanitized MPD segment timestamps to map content positions
-across the split, or determining what the `getVideoAds` response says when a
-marked break is skipped. The current trace does not capture that JSON body.
-This implementation captures and redacts manifest text; it does not yet
-parse timeline semantics or classify ad/content periods. No further click
-timing instrumentation is planned for this investigation.
+Next, inspect the sanitized MPD's in-band event representation and caption
+period references. The current URL sanitizer redacts `schemeIdUri` values,
+which can carry non-secret format identifiers as well as actual URLs; refine
+this narrowly so safe URNs/descriptor identifiers can be retained without
+exposing resource URLs or credentials. Keep the 1 MiB per-document and 2 MiB
+aggregate text limits, URL redaction, and DRM removal. Treat contiguous
+descriptor-bearing periods as one pod for timeline analysis; parsing
+individual ads within the pod is not required for the extension's purpose.
+Then recapture Pluto with captions explicitly enabled, if possible, to check
+whether ad periods have any caption traffic/cues and whether the post-ad
+destination tracks the intended timeline target.
+
+Further Amazon work is still useful but can be targeted: parse sanitized MPD
+segment timestamps to map content positions across its two content portions,
+or determine what `getVideoAds` returns when a marked break is skipped.
+Across both providers, distinguish requests and measurement beacons from
+media actually played. The current implementation captures and redacts
+manifest text but does not parse timeline semantics or classify ad/content
+periods. No further click-timing instrumentation is planned.
