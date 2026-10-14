@@ -61,6 +61,42 @@ without claiming causality from correlation alone.
 
 - Caption discovery, retrieval, and normalization are user-confirmed for
   YouTube, Prime Video, and Tubi, as described in the related project note.
+- A Tubi Playback Trace ran for 13 minutes 5 seconds. The user armed it on the
+  home screen, clicked a movie in the carousel, and captured playback on the
+  resulting page without reloading the whole page after arming. The movie
+  began at media time zero with no preroll ad. Its player duration was
+  8,239.963 seconds (2:17:19.963), matching the user's displayed
+  02:17:19.
+- Five sanitized HLS manifests were captured shortly after the carousel
+  click: one master playlist and four media playlists. The master lists
+  multiple video renditions and an audio group. The media playlists are VOD
+  playlists with roughly 1,373-1,374 byte-range segments; their summed
+  `EXTINF` durations are 8,239.963-8,239.965 seconds, matching the movie
+  duration. None contains `EXT-X-DATERANGE`, cue/SCTE tags, or
+  `EXT-X-DISCONTINUITY`. In this trace, the captured HLS playlists therefore
+  describe the full movie timeline without an explicit ad-break marker.
+- At elapsed 669.90 seconds, when the main movie's media time was 664.432
+  seconds (about 11:04), the main video paused. A second video element was
+  discovered and played five sequential clips with reported durations
+  15.019, 30.037, 30.251, 15.019, and 15.019 seconds, totaling 105.345
+  seconds. The trace then shows the ad video ending and the movie resuming at
+  664.432 seconds, with its 8,239.963-second duration unchanged. This is
+  strong evidence that this Tubi break was played in a separate video element
+  outside the movie's media-time timeline, unlike Pluto's ad periods embedded
+  in its stitched MPD. The ad clips' UI behavior and distinct media host also
+  match the user's observation that the ads played as a sequence. A nearby
+  Tubi JSON request may relate to the ad transition, but its response body
+  was not captured and its role is unknown.
+- No caption-specific requests or subtitle rendition appeared in this Tubi
+  trace. Since the user did not check or change caption settings, this does
+  not establish whether captions were enabled or whether Tubi captions would
+  continue through this separately played ad sequence.
+- The captured Tubi HLS `EXT-X-KEY` tags included a DRM `KEYID` value. A key
+  identifier is not a decryption key, but should be treated as sensitive
+  metadata and not shared unnecessarily. The earlier HLS sanitizer redacted
+  key URIs but missed this attribute; future traces now redact `KEYID` while
+  retaining non-secret key-format identifiers. This Tubi artifact predates
+  that fix; avoid sharing it and delete it when no longer needed.
 - Pluto playback has produced successful `200` responses for paths shaped
   like `/dash/.../text/en-cc/<segment>.m4s`, with MIME type
   `video/iso.segment`, alongside audio and video segment requests.
@@ -298,6 +334,11 @@ without claiming causality from correlation alone.
 - Whether the Pluto caption fragments requested around the seek/ad sequence
   contain cues for ads, program content, or both, and how their source
   timestamps map to the player timeline.
+- Whether Tubi's out-of-band ad decision/metadata can be identified from
+  network metadata alone, and whether Tubi captions are active or available
+  during a separately played ad sequence.
+- Whether the Tubi behavior observed here—movie time pausing while a separate
+  ad video element plays—is consistent across other titles and breaks.
 - Whether ad boundaries are explicitly signaled, represented as separate
   periods/playlists, inferred by the player, or absent from the observable
   manifest.
@@ -306,10 +347,11 @@ without claiming causality from correlation alone.
 - Whether the observed Pluto subtitle fragments can be assembled into a
   complete, correctly timed caption track, and how to avoid gaps or duplicate
   cues.
-- - Which findings generalize across services versus requiring provider-specific
+- Which findings generalize across services versus requiring provider-specific
   adapters. Amazon and Pluto both use DASH in the observed sessions, but
   Amazon's separately requested interstitial MPDs and Pluto's stitched
-  `main.mpd` endpoint suggest different observable ad-delivery shapes.
+  `main.mpd` endpoint differ from Tubi's captured full-duration HLS playlists
+  and separately played ad video element.
 - What the Amazon ad MPDs say about period boundaries, media timestamps, and
   the relationship between the seven observed manifest URLs and the
   user-visible ad sequence.
@@ -494,29 +536,30 @@ network dumps by default.
     after the first click. Compare that with the explicit reload performed by
     caption CDP retrieval; do not add another-click or automatic-reload behavior
     until the path causing this discrepancy is identified.
-- Increase or restructure bounded manifest inspection for Pluto's
-  `main.mpd`, which exceeded the current per-document limit. Preserve the
-  overall body budget, sanitization, and URL/DRM redaction.
-- Inspect how the Pluto manifest's periods and subtitle references relate to
-  the observed `text/en-cc/*.m4s` requests and the post-ad media-time jump.
-- Select one of the already-working caption services for comparison and
-  collect the same manifest/timeline evidence categories.
+- Refine redaction narrowly enough to preserve safe non-URL DASH descriptor
+  identifiers, then determine the meaning of Pluto's repeated
+  `InbandEventStream` descriptor and compare it with the observed ad pods.
+- Relate Pluto caption period references to `text/en-cc/*.m4s` requests and
+  the post-ad media-time jump.
+- With captions explicitly enabled, capture Tubi around a later ad break to
+  see whether caption requests/cues pause with movie time, appear for ads, or
+  resume with the movie.
 - Based on these results, decide what a minimal shared representation must
   preserve and which semantics belong in provider-specific parsing.
 
 ## Playback Trace implementation status
 
 **Implemented as a bounded metadata plus sanitized-manifest trace; live
-validated on Amazon and exercised on Pluto. Pluto's stitched MPD exceeds the
-current per-document body-retention limit; other platforms remain unverified
-in Chrome.**
+validated on Amazon and Tubi and exercised on Pluto. Pluto's stitched MPD was
+captured after increasing the per-document body-retention limit. Other
+platforms remain unverified in Chrome.**
 
 - The popup offers **Start Playback Trace** even when it has found no video.
   The background attaches CDP Network monitoring without reloading the tab;
   it records request/response metadata for document, media, XHR, and Fetch
   traffic. It reads response bodies only for successful candidate DASH/HLS
   requests and retains them only after format validation and URL redaction;
-  arbitrary responses, media segments, and DRM/license metadata are not
+  arbitrary responses, media segments, DRM/license URLs, and HLS key IDs are not
   retained.
 - When a video is discovered, the content script records initial state,
   play/pause, seek, source/lifecycle events, and a media-time sample at most
@@ -526,8 +569,8 @@ in Chrome.**
   button.
 - Network URLs omit query/fragment data and mask UUID/long opaque path
   segments. Captured manifest text also redacts resource URLs, BaseURL,
-  query-bearing attribute values, DRM ContentProtection/PSSH, and license
-  elements while retaining timing and structural fields.
+  query-bearing attribute values, DRM ContentProtection/PSSH and license
+  elements, and HLS KEYID values while retaining timing and structural fields.
   Click text, form values, headers, cookies, and non-manifest body contents are
   not captured. Top-level document clicks are observable; clicks inside
   cross-origin frames may not be.
