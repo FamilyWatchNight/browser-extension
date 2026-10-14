@@ -155,6 +155,134 @@ describe('service-worker message contracts', () => {
     expect(Object.keys(chromeFixture.localStorage)).toContain('playbackTraceMeta');
   });
 
+  it('returns the existing trace state when a new trace is rejected', async () => {
+    await import('../../entries/background/service-worker');
+
+    const startResponse = vi.fn();
+    chromeFixture.messageListeners[0](
+      { type: 'START_PLAYBACK_TRACE', tabId: 42 },
+      {},
+      startResponse,
+    );
+    await vi.waitFor(() => expect(startResponse).toHaveBeenCalledWith(
+      expect.objectContaining({
+        success: true,
+        state: expect.objectContaining({ phase: 'recording', tabId: 42 }),
+      }),
+    ));
+
+    const stopResponse = vi.fn();
+    chromeFixture.messageListeners[0](
+      { type: 'STOP_PLAYBACK_TRACE', tabId: 42 },
+      {},
+      stopResponse,
+    );
+    await vi.waitFor(() =>
+      expect(stopResponse).toHaveBeenCalledWith(
+        expect.objectContaining({
+          success: true,
+          state: expect.objectContaining({ phase: 'completed', tabId: 42 }),
+        }),
+      ),
+    );
+
+    const retryResponse = vi.fn();
+    chromeFixture.messageListeners[0](
+      { type: 'START_PLAYBACK_TRACE', tabId: 1 },
+      {},
+      retryResponse,
+    );
+    await vi.waitFor(() =>
+      expect(retryResponse).toHaveBeenCalledWith(
+        expect.objectContaining({
+          success: false,
+          state: expect.objectContaining({ phase: 'completed', tabId: 42 }),
+          error: expect.stringContaining('A saved playback trace already exists'),
+        }),
+      ),
+    );
+  });
+
+  it('captures only validated, sanitized manifest bodies within the trace', async () => {
+    vi.spyOn(chromeFixture.chrome.debugger, 'sendCommand').mockImplementation(
+      (_debuggee, method) =>
+        method === 'Network.getResponseBody'
+          ? Promise.resolve({
+              body: '<MPD mediaPresentationDuration="PT90S"><BaseURL>https://cdn.example/ad?token=private</BaseURL><Period id="ad" duration="PT15S"/></MPD>',
+              base64Encoded: false,
+            })
+          : Promise.resolve(undefined),
+    );
+    await import('../../entries/background/service-worker');
+
+    const startResponse = vi.fn();
+    chromeFixture.messageListeners[0](
+      { type: 'START_PLAYBACK_TRACE', tabId: 42 },
+      {},
+      startResponse,
+    );
+    await vi.waitFor(() => expect(startResponse).toHaveBeenCalled());
+
+    const onDebuggerEvent = chromeFixture.debuggerEventListeners[0];
+    onDebuggerEvent({ tabId: 42 }, 'Network.requestWillBeSent', {
+      requestId: 'manifest-1',
+      type: 'Fetch',
+      request: {
+        method: 'GET',
+        url: 'https://ads.example/dash/interstitial/manifest.mpd?token=private',
+      },
+    });
+    onDebuggerEvent({ tabId: 42 }, 'Network.responseReceived', {
+      requestId: 'manifest-1',
+      type: 'Fetch',
+      response: {
+        status: 200,
+        mimeType: 'application/dash+xml',
+        url: 'https://ads.example/dash/interstitial/manifest.mpd?token=private',
+      },
+    });
+    onDebuggerEvent({ tabId: 42 }, 'Network.loadingFinished', {
+      requestId: 'manifest-1',
+      encodedDataLength: 200,
+    });
+    await vi.waitFor(() =>
+      expect(chromeFixture.chrome.debugger.sendCommand).toHaveBeenCalledWith(
+        { tabId: 42 },
+        'Network.getResponseBody',
+        { requestId: 'manifest-1' },
+      ),
+    );
+
+    const stopResponse = vi.fn();
+    chromeFixture.messageListeners[0]({ type: 'STOP_PLAYBACK_TRACE', tabId: 42 }, {}, stopResponse);
+    await vi.waitFor(() =>
+      expect(stopResponse).toHaveBeenCalledWith(
+        expect.objectContaining({
+          success: true,
+          state: expect.objectContaining({ phase: 'completed' }),
+        }),
+      ),
+    );
+    const exportResponse = vi.fn();
+    chromeFixture.messageListeners[0]({ type: 'EXPORT_PLAYBACK_TRACE' }, {}, exportResponse);
+    await vi.waitFor(() => expect(exportResponse).toHaveBeenCalled());
+
+    const exported = exportResponse.mock.calls[0][0];
+    expect(exported.state.bodyBytes).toBeGreaterThan(0);
+    expect(exported.events).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          category: 'network',
+          name: 'manifest_captured',
+          manifestFormat: 'dash-mpd',
+          manifestText: expect.stringContaining('mediaPresentationDuration="PT90S"'),
+        }),
+      ]),
+    );
+    expect(JSON.stringify(exported)).not.toContain('private');
+    expect(JSON.stringify(exported)).not.toContain('https://cdn.example');
+  });
+
   it('finalizes from the 150-minute alarm using the limit-ended status', async () => {
     await import('../../entries/background/service-worker');
 
@@ -177,6 +305,7 @@ describe('service-worker message contracts', () => {
         }),
       );
     });
+
     expect(chromeFixture.chrome.alarms.clear).toHaveBeenCalledWith(`playbackTrace:${traceId}`);
   });
 

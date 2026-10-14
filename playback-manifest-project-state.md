@@ -21,7 +21,9 @@ minutes; reaching that limit should stop and finalize the trace exactly as if
 the user had clicked Stop.
 
 This is an exploration note, not a claim that the extension currently parses
-manifests or identifies ads. Record observations as **confirmed**,
+manifest timing semantics or identifies ads automatically. It can retain
+bounded, structurally validated, sanitized DASH/HLS manifest text for
+inspection. Record observations as **confirmed**,
 **disproven**, or **unknown**. Keep provider-specific details separate from
 cross-service conclusions.
 
@@ -88,6 +90,75 @@ without claiming causality from correlation alone.
   time-sample before the click was about 15 seconds earlier, while the click
   and seek events already reported the new position. This trace therefore
   cannot establish the exact seek delta or prove the click caused that seek.
+- A second Amazon trace ran for 2 minutes 44 seconds, was armed before the
+  movie started. The user observed an initial sequence of ads before movie
+  playback; the trace began with two video elements at zero time. It recorded
+  early DASH-host `text/xml` traffic and, after the user's later timeline
+  click, another ad break: the main video duration increased by about 17
+  seconds, and a separate ad-host MPD response arrived alongside interstitial
+  media requests. The trace had no bodies, so the early XML document's format
+  and the later MPD's period/timeline structure remain unconfirmed.
+- A third Amazon trace ran for 4 minutes 21 seconds and captured ten DASH
+  MPDs. An Amazon `getVideoAds` request and response were recorded about
+  2.8-3.5 seconds after trace start, well before the user's later seek; a
+  second such request appeared around the eventual break. This is consistent
+  with the player's early ad-break awareness and timeline dot, but the JSON
+  response body was not captured, so the data it supplies is unknown. Before
+  the later ad break, the main media element reported 4,560
+  seconds (76 minutes), matching the first corrected content MPD's declared
+  duration of 20:14.922 plus a subsequent corrected MPD duration of 55:45.078:
+  together, exactly 76 minutes. At the break, player duration increased to
+  4,721.161 seconds, an increase of 161.161 seconds. Eight captured
+  interstitial MPDs had declared durations totaling about 161.355 seconds.
+  This close match strongly supports the idea that duration increase tracks
+  ad time inserted into the player timeline in this session. The MPDs each
+  describe one static period; summed declared durations do not prove that
+  every rendition was actually played. The user confirms that the roughly
+  20-minute content MPD corresponds to the movie portion before the single
+  visible mid-roll break, and the roughly 55-minute MPD to the remaining
+  content after it. This gives the two MPDs a concrete relationship to the
+  program around the break: they appear to describe the two content portions
+  on either side of the inserted ad interval, rather than two unrelated
+  alternate versions. Their durations sum to the 76-minute content baseline.
+- Comparing the same title across captures shows the initial 4,560-second
+  duration recurring when tracing before the observed mid-roll insertion
+  (first and third captures). In the run where preroll ads played first, the
+  first observed main-video duration was already 4,622.062 seconds, 62.062
+  seconds above that baseline; it later increased by 17.017 seconds to
+  4,639.079. This is consistent with duration already including preroll time
+  before the first video-duration observation, but the older trace did not
+  capture manifest bodies and cannot confirm when or why the baseline was set.
+- A fourth Amazon trace ran for 1 minute 56 seconds and captured three MPDs.
+  At 0.26 seconds, the long-duration video element first reported 4,574.014
+  seconds. The trace also captured an interstitial MPD declaring 14.037
+  seconds and requests for its audio/video initialization and media segments.
+  Compared with the 4,560-second content baseline from prior captures of this
+  title, the first observed duration was 14.014 seconds longer, within about
+  23 milliseconds of the interstitial duration. This strengthens the evidence
+  that preroll time can already be included in the earliest duration observed
+  by a trace armed before playback; it does not reveal a clean, pre-ad duration
+  in this run.
+- The fourth trace also recorded a separate 37.120-second video duration and
+  a non-interstitial MPD with the same duration. Along with the two video
+  elements seen in earlier traces, this is consistent with the user's
+  backdrop/preview-video hypothesis, but the trace does not associate each
+  MPD with a specific element or establish what the page does with it.
+- At 43.5 seconds into the fourth trace, a trusted click on an `input` target
+  was followed by a pause/seek to media time 1,180.424 seconds (19:40.424),
+  then playback resumed about 0.8 seconds later. Amazon issued a
+  `getVideoAds` request at the seek, but the trace recorded no subsequent
+  interstitial MPD or ad-media requests, no duration increase, and no
+  playback-time discontinuity after resuming. This matches the user's
+  observation that the marked break passed without ads playing. The request
+  shows the player evaluated an ad opportunity; by itself it does not prove
+  an ad was available or served. The trace supports distinguishing a timeline
+  marker/ad decision from an actually delivered ad break.
+- The third trace exposed a sanitizer gap: retained DASH text still included
+  DRM `ContentProtection`/PSSH initialization metadata. It is not a
+  decryption key, but can contain key identifiers and license configuration
+  and should be treated as sensitive. Future captures now strip DRM/license
+  elements. The already-exported trace predates that fix and should not be
+  shared; delete the downloaded artifact when no longer needed.
 - The user reports that the first Playback Trace start after opening Chrome
   or updating the extension causes a tab reload, after which the popup shows
   no trace and requires a second start. This is not explained by the current
@@ -101,8 +172,8 @@ without claiming causality from correlation alone.
 ### Unknown
 
 - Which manifest or playlist formats and variants are used by each service
-  during the target playback sessions, and whether the extension can observe
-  their bodies.
+  during target playback sessions. Candidate manifest body capture has been
+  live-validated on Amazon; it remains unverified on other providers.
 - Whether Pluto's startup manifest can be observed and how its subtitle
   fragments are described or timed.
 - Whether ad boundaries are explicitly signaled, represented as separate
@@ -120,6 +191,16 @@ without claiming causality from correlation alone.
   user-visible ad sequence.
 - Whether Amazon's content and ad timelines share one presentation-time
   coordinate system, or how to map ad time back to program-relative time.
+- Whether the early extensionless Amazon XML response is an MPD or another
+  player document, and which MPD fields/markers correspond to the visible ad
+  break.
+- Whether a pre-roll-free duration is observable before the first
+  advertisement. The fourth trace shows the earliest duration observation
+  already closely matching content plus the captured preroll, rather than
+  exposing a clean baseline.
+- Whether Amazon's changing video duration alone remains a reliable
+  cumulative-ad-duration measure across repeated breaks, seeking, title
+  variants, and ad-first playback.
 - Why the first trace start after browser startup or extension update is
   reported to reload the tab and lose the trace, despite the current source
   persisting the recording state before debugger attachment.
@@ -180,8 +261,10 @@ the formats that need support.
    timeline, not a live stream that needs a person or chat to keep up. Include
    playback lifecycle/time changes and relevant request metadata so later
    analysis can find startup, ad-like transitions, and manifest changes.
-   Store candidate text bodies only when justified and safe; never collect
-   media segment bodies as a default. The planned duration limit is 150
+   Store only validated DASH/HLS text after removing resource URLs and
+   DRM/license initialization data; never collect media segment bodies or
+   arbitrary response bodies. The duration
+   limit is 150
    minutes. At that limit, invoke the same stop/finalization path as a manual
    Stop action so the trace is closed cleanly and its artifact is available
    for later inspection. Initial pilot storage limits are 8 MiB of serialized
@@ -217,9 +300,13 @@ the formats that need support.
    player did not use it. CDP only observes requests after attachment, so
    report the arm/attach boundary and any startup events that may have been
    missed.
-5. **Inspect candidate bodies structurally.** Record only format, relevant
-   structural fields, timing relationships, redacted resource paths, and
-   validation outcome. Do not save full signed URLs, credentials, or media or
+5. **Inspect candidate bodies structurally.** The trace retains only bodies
+   whose text validates as a DASH MPD or HLS playlist, strips resource
+   references and DRM/license elements, rejects DTD/entity declarations, and
+   limits each manifest to 256 KiB and all retained manifest text to a 2 MiB
+   sub-budget. Inspect the
+   exported, sanitized structure for format, timing relationships, periods,
+   and ad markers. Do not save full signed URLs, credentials, or media or
    caption payloads in this note.
 6. **Compare program and ad transitions.** Gather evidence before, during,
    and after an observed ad. Check whether manifest identity, period/playlist,
@@ -296,22 +383,28 @@ network dumps by default.
 
 ## Playback Trace implementation status
 
-**Implemented as a metadata-only first slice; partially live-validated on
-Amazon, with other platforms and full-length unattended runs still
-unverified.**
+**Implemented as a bounded metadata plus sanitized-manifest trace; initial
+live validation on Amazon, with DRM sanitization tightened after inspecting
+the first captured MPDs; other platforms remain unverified in Chrome.**
 
 - The popup offers **Start Playback Trace** even when it has found no video.
   The background attaches CDP Network monitoring without reloading the tab;
   it records request/response metadata for document, media, XHR, and Fetch
-  traffic and never reads response bodies.
+  traffic. It reads response bodies only for successful candidate DASH/HLS
+  requests and retains them only after format validation and URL redaction;
+  arbitrary responses, media segments, and DRM/license metadata are not
+  retained.
 - When a video is discovered, the content script records initial state,
   play/pause, seek, source/lifecycle events, and a media-time sample at most
   every 15 seconds. While active, it also records page clicks with
   `isTrusted`, target tag/role, viewport coordinates, and current video times.
   Seek origin remains unknown. The popup does not add a separate “mark”
   button.
-- URLs in the trace omit query/fragment data and mask UUID/long opaque path
-  segments. Click text, form values, headers, cookies, and body contents are
+- Network URLs omit query/fragment data and mask UUID/long opaque path
+  segments. Captured manifest text also redacts resource URLs, BaseURL,
+  query-bearing attribute values, DRM ContentProtection/PSSH, and license
+  elements while retaining timing and structural fields.
+  Click text, form values, headers, cookies, and non-manifest body contents are
   not captured. Top-level document clicks are observable; clicks inside
   cross-origin frames may not be.
 - Events persist in bounded chunks in `chrome.storage.local`; the popup
@@ -320,26 +413,67 @@ unverified.**
   finalization path as manual Stop. A debugger detach is recorded as a failed
   trace rather than a successful completion.
 - Pilot caps are 8 MiB of serialized event records, 50,000 stored event
-  records, and a reserved 2 MiB text-body sub-budget (currently unused because
-  this first slice stores no bodies). At 75%, the trace warns; duplicate
+  records, a 2 MiB retained-manifest-text sub-budget, and a 256 KiB per
+  manifest limit. At 75%, the trace warns; duplicate
   network request/response records can be coalesced within a 30-second window
   while retaining repeat count. Routine time samples are already thinned.
   Reaching a hard cap finalizes and marks the trace limit-ended.
 
 Focused automated coverage verifies URL redaction, cap calculations,
 pre-video popup availability, network metadata recording, event export,
-150-minute alarm finalization, and video/seek/page-click event collection. It
-does not demonstrate that the debugger remains attached and local persistence
-works for a full unattended movie run. A first Amazon trace did complete and
-export after a manually stopped 4-minute-26-second run; it contained 1,161
-events and about 311 KB of serialized event data, with no response bodies.
-It captured the ad-decision call and ad-delivery requests but not manifest
-contents. The click/seek records were not precise enough to reconstruct the
-pre-seek position.
+150-minute alarm finalization, manifest validation/sanitization, body capture,
+and video/seek/page-click event collection. The third and fourth Amazon traces
+confirm manifest body retrieval and local export work in Chrome for this
+provider; other platforms and a full unattended movie run remain untested.
+A first Amazon trace did complete and export after a manually stopped
+4-minute-26-second run; it contained 1,161 events and about 311 KB of
+serialized event data, with no response bodies. It captured the ad-decision
+call and ad-delivery requests but not manifest contents. A second
+pre-playback Amazon trace found early DASH-host XML and a later ad MPD
+request. A third trace captured ten MPDs and showed their declared ad
+durations closely matching the video-duration increase. That third artifact
+was exported before the DRM sanitizer fix and contains ContentProtection/PSSH
+metadata; treat it as sensitive and do not share it. Delete the downloaded
+file when no longer needed. The updated sanitizer now removes DRM/license
+elements, with regression coverage.
 
-The next investigation should improve seek-boundary timing, then inspect
-redacted, narrowly selected Amazon ad and content manifest structures (where
-available) to determine period/timing semantics. Prefer an opt-in, bounded
-capture of only validated playback-manifest text over collecting arbitrary
-response bodies. For cross-service comparison, arm before navigation/player
-startup and repeat the same before/during/after evidence collection on Pluto.
+The current hypothesis is that, for this Amazon title/session, the player
+duration minus the 76-minute content baseline approximates ad time included
+in the player timeline. The baseline is supported by two corrected content
+MPD durations (20:14.922 + 55:45.078); in one trace, the 161.161-second
+duration increase nearly matches the 161.355 seconds declared across eight
+interstitial MPDs. The fourth trace adds evidence for preroll: its earliest
+long-video duration was 14.014 seconds above the baseline, nearly matching
+the 14.037-second preroll MPD. Thus, duration arithmetic may help estimate
+total ad time included in the player duration when a separate content baseline
+is known, but it cannot be assumed that the first observed duration is
+content-only. Nor does total duration reveal where ad time falls relative to
+the current playhead. The user-seeked break in the fourth trace generated an
+ad-decision request but no captured ad media or duration change, showing that
+a visible marker/request is not proof that an ad was delivered. This remains
+strong evidence from one title, not a general cross-service normalization
+rule.
+
+The next experiment should be a before/during/after Playback Trace on Pluto,
+preferably while also observing its known caption-segment requests or native
+caption cues. Pluto is the highest-value next step because it can test whether
+the trace captures a second provider's manifest format and ad-boundary
+signals, while directly connecting the original caption-timing question to
+ad transitions. Arm before playback; note whether the opening ad is visible,
+and capture one later transition if practical. Compare manifest/playlist
+structure, video duration and media time, ad-related requests, and subtitle
+segment/cue activity; distinguish a marked or requested break from an ad
+whose media is actually fetched or played. Avoid trying to force a complete
+cross-platform model from a single run.
+
+The Amazon evidence is already strong enough to justify broadening the sample:
+the two content MPDs on either side of the visible break sum to the clean
+76-minute program baseline, and captured interstitial durations closely
+account for inserted time. Further Amazon work is still useful, but can be a
+targeted follow-up if Pluto leaves a question that Amazon can answer—for
+example, parsing sanitized MPD segment timestamps to map content positions
+across the split, or determining what the `getVideoAds` response says when a
+marked break is skipped. The current trace does not capture that JSON body.
+This implementation captures and redacts manifest text; it does not yet
+parse timeline semantics or classify ad/content periods. No further click
+timing instrumentation is planned for this investigation.

@@ -60,6 +60,8 @@ export interface PlaybackTraceEvent {
   status?: number;
   mimeType?: string;
   encodedDataLength?: number;
+  manifestFormat?: 'dash-mpd' | 'hls';
+  manifestText?: string;
   mediaTime?: number;
   previousMediaTime?: number;
   mediaTimes?: Array<{ videoId: string; currentTime: number }>;

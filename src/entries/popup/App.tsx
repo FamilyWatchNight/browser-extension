@@ -104,8 +104,7 @@ export default function PopupApp() {
         setCaptionProbeLoading(state.phase === 'discovering');
         setCaptionProbeError(state.error);
       } else if (
-        message.type === 'PLAYBACK_TRACE_UPDATED' &&
-        activeTabId === (message.state as PlaybackTraceState).tabId
+        message.type === 'PLAYBACK_TRACE_UPDATED'
       ) {
         setPlaybackTraceState(message.state as PlaybackTraceState);
       }
@@ -531,7 +530,8 @@ export default function PopupApp() {
       >
         <strong>Playback Trace</strong>
         <div style={{ marginTop: '4px', fontSize: '12px', color: '#666' }}>
-          Captures redacted network metadata and playback events for up to{' '}
+          Captures redacted network metadata, playback events, and validated DASH/HLS manifests
+          (with resource URLs and DRM/license metadata removed) for up to{' '}
           {PLAYBACK_TRACE_MAX_DURATION_MS / 60_000} minutes. Start before a video appears.
         </div>
         {playbackTraceState?.phase === 'recording' ? (
@@ -539,6 +539,7 @@ export default function PopupApp() {
             <div role="status" style={{ marginTop: '8px', fontSize: '12px' }}>
               Recording on tab {playbackTraceState.tabId}: {playbackTraceState.eventCount} events;{' '}
               {(playbackTraceState.serializedBytes / (1024 * 1024)).toFixed(2)} MiB;{' '}
+              {(playbackTraceState.bodyBytes / 1024).toFixed(0)} KiB manifest text;{' '}
               {formatTraceElapsed(playbackTraceState.elapsedMs)} elapsed.
             </div>
             <div style={{ marginTop: '4px', fontSize: '12px', color: '#666' }}>
@@ -565,6 +566,7 @@ export default function PopupApp() {
               {formatTraceElapsed(playbackTraceState.elapsedMs)} with{' '}
               {playbackTraceState.eventCount} events (
               {(playbackTraceState.serializedBytes / (1024 * 1024)).toFixed(2)} MiB).
+              {' '}{(playbackTraceState.bodyBytes / 1024).toFixed(0)} KiB manifest text.
               {playbackTraceState.endReason && ` End reason: ${playbackTraceState.endReason}.`}
             </div>
             {playbackTraceState.error && (

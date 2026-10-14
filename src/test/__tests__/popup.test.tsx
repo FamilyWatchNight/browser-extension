@@ -32,6 +32,36 @@ describe('popup video discovery', () => {
     expect(screen.getByText(/Start before a video appears/)).toBeTruthy();
   });
 
+  it('shows saved trace actions even when the trace belongs to another tab', async () => {
+    chromeFixture.chrome.tabs.sendMessage = vi.fn().mockResolvedValue([]);
+
+    render(<PopupApp />);
+
+    await act(async () => {
+      await Promise.resolve();
+    });
+    await act(async () => {
+      chromeFixture.portMessageListeners[0]({
+        type: 'PLAYBACK_TRACE_UPDATED',
+        state: {
+          traceId: 'saved-trace',
+          tabId: 42,
+          phase: 'completed',
+          startedAt: new Date().toISOString(),
+          endedAt: new Date().toISOString(),
+          elapsedMs: 1000,
+          eventCount: 3,
+          serializedBytes: 500,
+          bodyBytes: 0,
+          endReason: 'manual',
+        },
+      });
+    });
+
+    expect(screen.getByRole('button', { name: 'Export trace' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Delete saved trace' })).toBeTruthy();
+  });
+
   it('retries when the page initially has no videos', async () => {
     const video = {
       id: 'video-1',

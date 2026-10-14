@@ -27,14 +27,17 @@ import {
 } from '../../shared/utils/caption-validation';
 import {
   PLAYBACK_TRACE_CHUNK_SIZE,
+  PLAYBACK_TRACE_MAX_BODY_BYTES,
   PLAYBACK_TRACE_MAX_BYTES,
   PLAYBACK_TRACE_MAX_DURATION_MS,
   PLAYBACK_TRACE_MAX_EVENTS,
+  PLAYBACK_TRACE_MAX_MANIFEST_BYTES,
   PLAYBACK_TRACE_PERSIST_BATCH_SIZE,
   PLAYBACK_TRACE_WARNING_RATIO,
   getPlaybackTraceEventSize,
   getPlaybackTraceLimitReason,
   redactPlaybackTraceUrl,
+  sanitizePlaybackManifest,
 } from '../../shared/utils/playback-trace';
 import { useExtensionStore } from '../../state/store';
 
@@ -83,10 +86,20 @@ type PlaybackTraceRecord = {
   persistenceQueue: Promise<void>;
   lastPersistedEventCount: number;
   pendingUpdates: number;
+  pendingManifestCaptures: Set<Promise<void>>;
 };
 
 let playbackTrace: PlaybackTraceRecord | undefined;
-const playbackTraceRequestIdsByTab = new Map<number, Set<string>>();
+type PlaybackTraceRequest = {
+  url: string;
+  method?: string;
+  resourceType?: string;
+  status?: number;
+  mimeType?: string;
+  contentLength?: number;
+  encodedDataLength?: number;
+};
+const playbackTraceRequestsByTab = new Map<number, Map<string, PlaybackTraceRequest>>();
 const playbackTraceReady = restorePlaybackTrace().catch((error) => {
   console.error('[Service Worker] Failed to restore playback trace:', formatError(error));
 });
@@ -1008,8 +1021,9 @@ async function restorePlaybackTrace(): Promise<void> {
     persistenceQueue: Promise.resolve(),
     lastPersistedEventCount: Math.min(events.length, state.eventCount),
     pendingUpdates: 0,
+    pendingManifestCaptures: new Set(),
   };
-  playbackTraceRequestIdsByTab.set(state.tabId, new Set());
+  playbackTraceRequestsByTab.set(state.tabId, new Map());
 
   if (playbackTrace.state.phase !== 'recording') return;
 
@@ -1051,6 +1065,7 @@ async function startPlaybackTrace(tabId: number): Promise<PlaybackTraceResponse>
   if (playbackTrace) {
     return {
       success: false,
+      state: { ...playbackTrace.state },
       error:
         'A saved playback trace already exists. Export it and delete it before starting another.',
     };
@@ -1078,8 +1093,9 @@ async function startPlaybackTrace(tabId: number): Promise<PlaybackTraceResponse>
     persistenceQueue: Promise.resolve(),
     lastPersistedEventCount: 0,
     pendingUpdates: 0,
+    pendingManifestCaptures: new Set(),
   };
-  playbackTraceRequestIdsByTab.set(tabId, new Set());
+  playbackTraceRequestsByTab.set(tabId, new Map());
 
   const debuggee = { tabId };
   try {
@@ -1163,19 +1179,12 @@ async function finishPlaybackTrace(reason: PlaybackTraceEndReason, error?: strin
   const record = playbackTrace;
   if (!record || record.state.phase !== 'recording' || record.stopping) return;
   record.stopping = true;
-  record.state.endedAt = new Date().toISOString();
-  record.state.elapsedMs = Math.max(0, Date.now() - Date.parse(record.state.startedAt));
-  record.state.endReason = reason;
-  record.state.phase =
-    reason === 'manual'
-      ? 'completed'
-      : reason === 'duration-limit' || reason === 'event-limit' || reason === 'size-limit'
-        ? 'limit-ended'
-        : 'failed';
-  if (error) record.state.error = error;
-
   chrome.alarms.clear(`${PLAYBACK_TRACE_ALARM_PREFIX}${record.state.traceId}`);
-  playbackTraceRequestIdsByTab.delete(record.state.tabId);
+  playbackTraceRequestsByTab.delete(record.state.tabId);
+  if (record.debuggerEventListener) {
+    chrome.debugger.onEvent.removeListener(record.debuggerEventListener);
+    record.debuggerEventListener = undefined;
+  }
   try {
     await chrome.tabs.sendMessage(record.state.tabId, {
       type: 'SET_PLAYBACK_TRACE_CONTENT',
@@ -1187,12 +1196,9 @@ async function finishPlaybackTrace(reason: PlaybackTraceEndReason, error?: strin
       formatError(sendError),
     );
   }
+  await Promise.allSettled([...record.pendingManifestCaptures]);
   if (record.debuggerAttached) {
     const debuggee = { tabId: record.state.tabId };
-    if (record.debuggerEventListener) {
-      chrome.debugger.onEvent.removeListener(record.debuggerEventListener);
-      record.debuggerEventListener = undefined;
-    }
     await chrome.debugger
       .sendCommand(debuggee, 'Network.disable')
       .catch((disableError) =>
@@ -1211,6 +1217,16 @@ async function finishPlaybackTrace(reason: PlaybackTraceEndReason, error?: strin
       );
     record.debuggerAttached = false;
   }
+  record.state.endedAt = new Date().toISOString();
+  record.state.elapsedMs = Math.max(0, Date.now() - Date.parse(record.state.startedAt));
+  record.state.endReason = reason;
+  record.state.phase =
+    reason === 'manual'
+      ? 'completed'
+      : reason === 'duration-limit' || reason === 'event-limit' || reason === 'size-limit'
+        ? 'limit-ended'
+        : 'failed';
+  if (error) record.state.error = error;
   await persistPlaybackTrace();
   broadcastPlaybackTraceState();
 }
@@ -1219,9 +1235,9 @@ function appendPlaybackTraceEvent(
   input: Omit<PlaybackTraceEvent, 'sequence' | 'elapsedMs' | 'timestamp'> & {
     timestamp?: string;
   },
-): void {
+): boolean {
   const record = playbackTrace;
-  if (!record || record.state.phase !== 'recording') return;
+  if (!record || record.state.phase !== 'recording') return false;
   const event: PlaybackTraceEvent = {
     ...input,
     sequence: record.events.length + 1,
@@ -1249,7 +1265,7 @@ function appendPlaybackTraceEvent(
         void finishPlaybackTrace('error', `Trace persistence failed: ${formatError(error)}`);
       });
     }
-    return;
+    return true;
   }
 
   const eventSize = getPlaybackTraceEventSize(event);
@@ -1260,7 +1276,7 @@ function appendPlaybackTraceEvent(
   );
   if (capReason) {
     void finishPlaybackTrace(capReason);
-    return;
+    return false;
   }
 
   record.events.push(event);
@@ -1288,6 +1304,7 @@ function appendPlaybackTraceEvent(
       void finishPlaybackTrace('error', `Trace persistence failed: ${formatError(error)}`);
     });
   }
+  return true;
 }
 
 function tryCoalescePlaybackTraceEvent(
@@ -1411,16 +1428,20 @@ function handlePlaybackTraceDebuggerEvent(tabId: number, method: string, params?
     const url = event.request?.url;
     if (!url || !isTraceResourceType(event.type)) return;
     if (event.requestId) {
-      let requestIds = playbackTraceRequestIdsByTab.get(tabId);
-      if (!requestIds) {
-        requestIds = new Set();
-        playbackTraceRequestIdsByTab.set(tabId, requestIds);
+      let requests = playbackTraceRequestsByTab.get(tabId);
+      if (!requests) {
+        requests = new Map();
+        playbackTraceRequestsByTab.set(tabId, requests);
       }
-      if (requestIds.size >= 10_000) {
-        const oldestRequestId = requestIds.values().next().value;
-        if (oldestRequestId) requestIds.delete(oldestRequestId);
+      if (requests.size >= 10_000) {
+        const oldestRequestId = requests.keys().next().value;
+        if (oldestRequestId) requests.delete(oldestRequestId);
       }
-      requestIds.add(event.requestId);
+      requests.set(event.requestId, {
+        url,
+        method: event.request?.method,
+        resourceType: event.type,
+      });
     }
     appendPlaybackTraceEvent({
       category: 'network',
@@ -1437,15 +1458,35 @@ function handlePlaybackTraceDebuggerEvent(tabId: number, method: string, params?
     const event = params as {
       requestId?: string;
       type?: string;
-      response?: { url?: string; status?: number; mimeType?: string };
+      response?: {
+        url?: string;
+        status?: number;
+        mimeType?: string;
+        headers?: Record<string, string>;
+      };
     };
     const url = event.response?.url;
+    const request = event.requestId
+      ? playbackTraceRequestsByTab.get(tabId)?.get(event.requestId)
+      : undefined;
     if (
       !url ||
       !isTraceResourceType(event.type) ||
-      (event.requestId && !playbackTraceRequestIdsByTab.get(tabId)?.has(event.requestId))
+      (event.requestId && !request)
     )
       return;
+    if (request) {
+      request.url = url;
+      request.resourceType = event.type;
+      request.status = event.response?.status;
+      request.mimeType = event.response?.mimeType;
+      const contentLength = Object.entries(event.response?.headers || {}).find(
+        ([name]) => name.toLowerCase() === 'content-length',
+      )?.[1];
+      if (contentLength && /^\d+$/.test(contentLength)) {
+        request.contentLength = Number(contentLength);
+      }
+    }
     appendPlaybackTraceEvent({
       category: 'network',
       name: 'response',
@@ -1459,21 +1500,159 @@ function handlePlaybackTraceDebuggerEvent(tabId: number, method: string, params?
 
   if (method === 'Network.loadingFinished') {
     const event = params as { requestId?: string; encodedDataLength?: number };
-    if (!event.requestId || !playbackTraceRequestIdsByTab.get(tabId)?.delete(event.requestId))
-      return;
+    const request = event.requestId
+      ? playbackTraceRequestsByTab.get(tabId)?.get(event.requestId)
+      : undefined;
+    if (!event.requestId || !request) return;
+    request.encodedDataLength = event.encodedDataLength;
+    playbackTraceRequestsByTab.get(tabId)?.delete(event.requestId);
     appendPlaybackTraceEvent({
       category: 'network',
       name: 'request_finished',
       encodedDataLength: event.encodedDataLength,
     });
+    if (request.status && request.status >= 200 && request.status < 300) {
+      const capture = capturePlaybackManifest(tabId, event.requestId, request);
+      const record = playbackTrace;
+      if (record) {
+        record.pendingManifestCaptures.add(capture);
+        void capture.finally(() => record.pendingManifestCaptures.delete(capture)).catch((error) => {
+          console.error('[Service Worker] Manifest capture failed:', formatError(error));
+        });
+      }
+    }
     return;
   }
 
   if (method === 'Network.loadingFailed') {
     const event = params as { requestId?: string };
-    if (!event.requestId || !playbackTraceRequestIdsByTab.get(tabId)?.delete(event.requestId))
-      return;
+    if (!event.requestId || !playbackTraceRequestsByTab.get(tabId)?.delete(event.requestId)) return;
     appendPlaybackTraceEvent({ category: 'network', name: 'request_failed' });
+  }
+}
+
+async function capturePlaybackManifest(
+  tabId: number,
+  requestId: string,
+  request: PlaybackTraceRequest,
+): Promise<void> {
+  if (!isPotentialPlaybackManifest(request.url, request.mimeType)) return;
+  const record = playbackTrace;
+  if (!record || record.state.phase !== 'recording' || record.state.tabId !== tabId) return;
+
+  if (
+    (request.contentLength && request.contentLength > PLAYBACK_TRACE_MAX_MANIFEST_BYTES) ||
+    (request.encodedDataLength && request.encodedDataLength > PLAYBACK_TRACE_MAX_MANIFEST_BYTES)
+  ) {
+    appendPlaybackTraceEvent({
+      category: 'network',
+      name: 'manifest_capture_skipped',
+      url: redactPlaybackTraceUrl(request.url),
+      resourceType: request.resourceType,
+      status: request.status,
+      mimeType: request.mimeType,
+      detail: 'manifest-over-per-document-limit',
+    });
+    return;
+  }
+
+  let source: string;
+  try {
+    const responseBody = (await chrome.debugger.sendCommand(
+      { tabId },
+      'Network.getResponseBody',
+      { requestId },
+    )) as { body: string; base64Encoded?: boolean };
+    source = responseBody.base64Encoded ? decodeBase64Utf8(responseBody.body) : responseBody.body;
+  } catch (error) {
+    console.warn('[Service Worker] Could not read candidate manifest body:', formatError(error));
+    appendPlaybackTraceEvent({
+      category: 'network',
+      name: 'manifest_capture_skipped',
+      url: redactPlaybackTraceUrl(request.url),
+      resourceType: request.resourceType,
+      status: request.status,
+      mimeType: request.mimeType,
+      detail: 'response-body-unavailable',
+    });
+    return;
+  }
+
+  if (new TextEncoder().encode(source).byteLength > PLAYBACK_TRACE_MAX_MANIFEST_BYTES) {
+    appendPlaybackTraceEvent({
+      category: 'network',
+      name: 'manifest_capture_skipped',
+      url: redactPlaybackTraceUrl(request.url),
+      resourceType: request.resourceType,
+      status: request.status,
+      mimeType: request.mimeType,
+      detail: 'manifest-over-per-document-limit',
+    });
+    return;
+  }
+  const manifest = sanitizePlaybackManifest(source);
+  if (!manifest) {
+    appendPlaybackTraceEvent({
+      category: 'network',
+      name: 'manifest_capture_skipped',
+      url: redactPlaybackTraceUrl(request.url),
+      resourceType: request.resourceType,
+      status: request.status,
+      mimeType: request.mimeType,
+      detail: 'response-was-not-a-supported-manifest',
+    });
+    return;
+  }
+  if (record.state.bodyBytes + manifest.byteLength > PLAYBACK_TRACE_MAX_BODY_BYTES) {
+    appendPlaybackTraceEvent({
+      category: 'network',
+      name: 'manifest_capture_skipped',
+      url: redactPlaybackTraceUrl(request.url),
+      resourceType: request.resourceType,
+      status: request.status,
+      mimeType: request.mimeType,
+      detail: 'manifest-body-budget-exhausted',
+    });
+    return;
+  }
+
+  const added = appendPlaybackTraceEvent({
+    category: 'network',
+    name: 'manifest_captured',
+    url: redactPlaybackTraceUrl(request.url),
+    method: request.method,
+    resourceType: request.resourceType,
+    status: request.status,
+    mimeType: request.mimeType,
+    manifestFormat: manifest.format,
+    manifestText: manifest.text,
+  });
+  if (added) {
+    record.state.bodyBytes += manifest.byteLength;
+    void persistPlaybackTrace().catch((error) => {
+      console.error('[Service Worker] Failed to persist captured manifest:', formatError(error));
+      void finishPlaybackTrace('error', `Manifest persistence failed: ${formatError(error)}`);
+    });
+  }
+}
+
+function isPotentialPlaybackManifest(url: string, mimeType?: string): boolean {
+  const normalizedMimeType = mimeType?.split(';', 1)[0].trim().toLowerCase();
+  if (
+    normalizedMimeType === 'application/dash+xml' ||
+    normalizedMimeType === 'application/vnd.apple.mpegurl' ||
+    normalizedMimeType === 'application/x-mpegurl' ||
+    normalizedMimeType === 'audio/mpegurl' ||
+    normalizedMimeType === 'audio/x-mpegurl'
+  ) {
+    return true;
+  }
+  if (normalizedMimeType !== 'text/xml' && normalizedMimeType !== 'application/xml') return false;
+  try {
+    const parsedUrl = new URL(url);
+    return /dash|manifest|interstitial/i.test(`${parsedUrl.hostname}${parsedUrl.pathname}`);
+  } catch {
+    return false;
   }
 }
 
