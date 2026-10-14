@@ -11,6 +11,10 @@ import type {
   ContentScriptMessage,
   ExtensionSettings,
   ExtensionState,
+  PlaybackTraceEndReason,
+  PlaybackTraceEvent,
+  PlaybackTraceResponse,
+  PlaybackTraceState,
   PopupMessage,
   VideoElement,
 } from '../../shared/messages';
@@ -21,6 +25,17 @@ import {
   isWorthReadingCaptionResponse,
   validateCaptionPayload,
 } from '../../shared/utils/caption-validation';
+import {
+  PLAYBACK_TRACE_CHUNK_SIZE,
+  PLAYBACK_TRACE_MAX_BYTES,
+  PLAYBACK_TRACE_MAX_DURATION_MS,
+  PLAYBACK_TRACE_MAX_EVENTS,
+  PLAYBACK_TRACE_PERSIST_BATCH_SIZE,
+  PLAYBACK_TRACE_WARNING_RATIO,
+  getPlaybackTraceEventSize,
+  getPlaybackTraceLimitReason,
+  redactPlaybackTraceUrl,
+} from '../../shared/utils/playback-trace';
 import { useExtensionStore } from '../../state/store';
 
 console.log('[Service Worker] Starting...');
@@ -42,6 +57,8 @@ const captionStatesByTab = new Map<number, CaptionCaptureState>();
 const retrievingCandidateIdsByTab = new Map<number, Set<string>>();
 const captionDiscoveryTasksByTab = new Map<number, Promise<CaptionDiscoveryResponse>>();
 const CAPTION_STATE_STORAGE_KEY = 'captionCaptureStates';
+const PLAYBACK_TRACE_META_KEY = 'playbackTraceMeta';
+const PLAYBACK_TRACE_ALARM_PREFIX = 'playbackTrace:';
 
 type PersistedCaptionCaptureState = CaptionCaptureState & {
   cdpCandidates: CaptionSourceCandidate[];
@@ -51,6 +68,27 @@ type PersistedCaptionCaptureState = CaptionCaptureState & {
 let captionPersistenceQueue = Promise.resolve();
 const captionStateReady = restoreCaptionStates().catch((error) => {
   console.error('[Service Worker] Failed to restore caption state:', formatError(error));
+});
+
+type PlaybackTraceRecord = {
+  state: PlaybackTraceState;
+  events: PlaybackTraceEvent[];
+  stopping: boolean;
+  debuggerAttached: boolean;
+  debuggerEventListener?: (
+    source: chrome.debugger.Debuggee,
+    method: string,
+    params?: object,
+  ) => void;
+  persistenceQueue: Promise<void>;
+  lastPersistedEventCount: number;
+  pendingUpdates: number;
+};
+
+let playbackTrace: PlaybackTraceRecord | undefined;
+const playbackTraceRequestIdsByTab = new Map<number, Set<string>>();
+const playbackTraceReady = restorePlaybackTrace().catch((error) => {
+  console.error('[Service Worker] Failed to restore playback trace:', formatError(error));
 });
 
 type CapturedCaptionPayload = {
@@ -111,6 +149,73 @@ chrome.runtime.onMessage.addListener(
       case 'RETRIEVE_CAPTION_SOURCE':
         handleRetrieveCaptionSource(message.tabId, message.candidateId, sendResponse);
         return true;
+      case 'GET_PLAYBACK_TRACE_STATE':
+        void playbackTraceReady.then(() => {
+          sendResponse({ success: true, state: getPlaybackTraceState(message.tabId) });
+        });
+        return true;
+      case 'START_PLAYBACK_TRACE':
+        void startPlaybackTrace(message.tabId)
+          .then(sendResponse)
+          .catch((error) => sendResponse({ success: false, error: formatError(error) }));
+        return true;
+      case 'STOP_PLAYBACK_TRACE':
+        void stopPlaybackTrace(message.tabId, 'manual')
+          .then(sendResponse)
+          .catch((error) => sendResponse({ success: false, error: formatError(error) }));
+        return true;
+      case 'DELETE_PLAYBACK_TRACE':
+        void deletePlaybackTrace()
+          .then(sendResponse)
+          .catch((error) => sendResponse({ success: false, error: formatError(error) }));
+        return true;
+      case 'EXPORT_PLAYBACK_TRACE':
+        void exportPlaybackTrace()
+          .then(sendResponse)
+          .catch((error) => sendResponse({ success: false, error: formatError(error) }));
+        return true;
+      case 'PLAYBACK_TRACE_CONTENT_READY':
+        if (sender.tab?.id !== undefined) {
+          void playbackTraceReady.then(() => {
+            if (
+              playbackTrace?.state.phase === 'recording' &&
+              playbackTrace.state.tabId === sender.tab?.id
+            ) {
+              chrome.tabs
+                .sendMessage(sender.tab.id, { type: 'SET_PLAYBACK_TRACE_CONTENT', active: true })
+                .catch((error) =>
+                  console.warn(
+                    '[Service Worker] Could not enable playback event capture:',
+                    formatError(error),
+                  ),
+                );
+            }
+          });
+        }
+        return false;
+      case 'PLAYBACK_TRACE_CONTENT_EVENT':
+        if (sender.tab?.id !== undefined) {
+          void playbackTraceReady.then(() => {
+            if (
+              playbackTrace?.state.phase === 'recording' &&
+              playbackTrace.state.tabId === sender.tab?.id
+            ) {
+              appendPlaybackTraceEvent({
+                category: message.event.name === 'page_click' ? 'interaction' : 'playback',
+                name: message.event.name,
+                mediaTime: message.event.mediaTime,
+                previousMediaTime: message.event.previousMediaTime,
+                mediaTimes: message.event.mediaTimes,
+                interaction: message.event.interaction,
+                duration: message.event.duration,
+                paused: message.event.paused,
+                detail: message.event.detail,
+                timestamp: message.event.timestamp,
+              });
+            }
+          });
+        }
+        return false;
       case 'UPDATE_SETTINGS':
         handleUpdateSettings(message.settings, sendResponse);
         return true;
@@ -149,6 +254,25 @@ chrome.runtime.onMessage.addListener(
   },
 );
 
+chrome.debugger.onDetach.addListener((source, reason) => {
+  if (source.tabId === undefined) return;
+  void playbackTraceReady.then(() => {
+    if (playbackTrace?.state.phase === 'recording' && playbackTrace.state.tabId === source.tabId) {
+      void finishPlaybackTrace('debugger-detached', `Debugger detached: ${reason}`);
+    }
+  });
+});
+
+chrome.alarms.onAlarm.addListener((alarm) => {
+  if (!alarm.name.startsWith(PLAYBACK_TRACE_ALARM_PREFIX)) return;
+  void playbackTraceReady.then(() => {
+    const traceId = alarm.name.slice(PLAYBACK_TRACE_ALARM_PREFIX.length);
+    if (playbackTrace?.state.traceId === traceId && playbackTrace.state.phase === 'recording') {
+      void finishPlaybackTrace('duration-limit');
+    }
+  });
+});
+
 // Listen for popup connection (long-lived port)
 chrome.runtime.onConnect.addListener((port) => {
   console.log('[Service Worker] Port connected:', port.name);
@@ -169,6 +293,11 @@ chrome.runtime.onConnect.addListener((port) => {
             type: 'CAPTION_STATE_UPDATED',
             state: getCaptionState(message.tabId),
           });
+        });
+      } else if (message.type === 'REQUEST_PLAYBACK_TRACE_STATE') {
+        void playbackTraceReady.then(() => {
+          const state = getPlaybackTraceState(message.tabId);
+          if (state) port.postMessage({ type: 'PLAYBACK_TRACE_UPDATED', state });
         });
       }
     });
@@ -372,7 +501,9 @@ function ensureUniqueCandidateIds(
     }
 
     ambiguousIds.add(candidate.id);
-    const identity = candidate.url || [
+    const identity =
+      candidate.url ||
+      [
       candidate.kind,
       candidate.videoId,
       candidate.nativeTrackIndex ?? 'page',
@@ -850,7 +981,514 @@ async function handleRetrieveCaptionSource(
     const state = getCaptionState(tabId);
     await updateCaptionState(tabId, state.phase, state.discovery);
   }
+}
 
+async function restorePlaybackTrace(): Promise<void> {
+  const stored = await chrome.storage.local.get(PLAYBACK_TRACE_META_KEY);
+  const state = stored[PLAYBACK_TRACE_META_KEY] as PlaybackTraceState | undefined;
+  if (!state) return;
+
+  const chunkCount = Math.ceil(state.eventCount / PLAYBACK_TRACE_CHUNK_SIZE);
+  const chunkKeys = Array.from({ length: chunkCount }, (_, index) =>
+    getPlaybackTraceChunkKey(state.traceId, index),
+  );
+  const storedChunks = chunkKeys.length ? await chrome.storage.local.get(chunkKeys) : {};
+  const events: PlaybackTraceEvent[] = [];
+  chunkKeys.forEach((key) => {
+    const chunk = storedChunks[key];
+    if (Array.isArray(chunk)) events.push(...(chunk as PlaybackTraceEvent[]));
+  });
+  events.sort((left, right) => left.sequence - right.sequence);
+
+  playbackTrace = {
+    state: { ...state },
+    events: events.slice(0, state.eventCount),
+    stopping: false,
+    debuggerAttached: false,
+    persistenceQueue: Promise.resolve(),
+    lastPersistedEventCount: Math.min(events.length, state.eventCount),
+    pendingUpdates: 0,
+  };
+  playbackTraceRequestIdsByTab.set(state.tabId, new Set());
+
+  if (playbackTrace.state.phase !== 'recording') return;
+
+  const elapsedMs = Date.now() - Date.parse(playbackTrace.state.startedAt);
+  if (elapsedMs >= PLAYBACK_TRACE_MAX_DURATION_MS) {
+    await finishPlaybackTrace('duration-limit');
+    return;
+  }
+
+  try {
+    attachPlaybackTraceEventListener(playbackTrace);
+    playbackTrace.debuggerAttached = true;
+    await chrome.debugger.sendCommand({ tabId: state.tabId }, 'Network.enable');
+    chrome.alarms.create(`${PLAYBACK_TRACE_ALARM_PREFIX}${state.traceId}`, {
+      when: Date.parse(state.startedAt) + PLAYBACK_TRACE_MAX_DURATION_MS,
+    });
+    await chrome.tabs
+      .sendMessage(state.tabId, {
+        type: 'SET_PLAYBACK_TRACE_CONTENT',
+        active: true,
+      })
+      .catch((error) =>
+        console.warn(
+          '[Service Worker] Content script is unavailable while restoring trace:',
+          formatError(error),
+        ),
+      );
+    broadcastPlaybackTraceState();
+  } catch (error) {
+    await finishPlaybackTrace(
+      'debugger-detached',
+      `Could not resume trace after worker restart: ${formatError(error)}`,
+    );
+  }
+}
+
+async function startPlaybackTrace(tabId: number): Promise<PlaybackTraceResponse> {
+  await playbackTraceReady;
+  if (playbackTrace) {
+    return {
+      success: false,
+      error:
+        'A saved playback trace already exists. Export it and delete it before starting another.',
+    };
+  }
+  if (debuggerCapturesByTab.has(tabId)) {
+    return { success: false, error: 'Caption CDP monitoring is already active for this tab.' };
+  }
+
+  const startedAt = new Date().toISOString();
+  const state: PlaybackTraceState = {
+    traceId: `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`,
+    tabId,
+    phase: 'recording',
+    startedAt,
+    elapsedMs: 0,
+    eventCount: 0,
+    serializedBytes: 0,
+    bodyBytes: 0,
+  };
+  playbackTrace = {
+    state,
+    events: [],
+    stopping: false,
+    debuggerAttached: false,
+    persistenceQueue: Promise.resolve(),
+    lastPersistedEventCount: 0,
+    pendingUpdates: 0,
+  };
+  playbackTraceRequestIdsByTab.set(tabId, new Set());
+
+  const debuggee = { tabId };
+  try {
+    await persistPlaybackTrace();
+    await chrome.debugger.attach(debuggee, '1.3');
+    playbackTrace.debuggerAttached = true;
+    attachPlaybackTraceEventListener(playbackTrace);
+    await chrome.debugger.sendCommand(debuggee, 'Network.enable');
+    chrome.alarms.create(`${PLAYBACK_TRACE_ALARM_PREFIX}${state.traceId}`, {
+      when: Date.now() + PLAYBACK_TRACE_MAX_DURATION_MS,
+    });
+    appendPlaybackTraceEvent({ category: 'trace', name: 'trace_started' });
+    await persistPlaybackTrace();
+    chrome.tabs
+      .sendMessage(tabId, { type: 'SET_PLAYBACK_TRACE_CONTENT', active: true })
+      .catch((error) =>
+        console.warn(
+          '[Service Worker] Content script is not ready yet; playback trace will enable it when available:',
+          formatError(error),
+        ),
+      );
+    broadcastPlaybackTraceState();
+    return { success: true, state: { ...state } };
+  } catch (error) {
+    await finishPlaybackTrace('error', formatError(error));
+    return { success: false, state: { ...state }, error: formatError(error) };
+  }
+}
+
+async function stopPlaybackTrace(
+  tabId: number,
+  reason: PlaybackTraceEndReason,
+): Promise<PlaybackTraceResponse> {
+  await playbackTraceReady;
+  if (!playbackTrace || playbackTrace.state.tabId !== tabId) {
+    return { success: false, error: 'There is no active playback trace for this tab.' };
+  }
+  if (playbackTrace.state.phase === 'recording') await finishPlaybackTrace(reason);
+  return { success: true, state: { ...playbackTrace.state } };
+}
+
+function getPlaybackTraceState(tabId?: number): PlaybackTraceState | undefined {
+  void tabId;
+  if (!playbackTrace) return;
+  updatePlaybackTraceElapsed();
+  return { ...playbackTrace.state };
+}
+
+async function exportPlaybackTrace(): Promise<PlaybackTraceResponse> {
+  await playbackTraceReady;
+  if (!playbackTrace || playbackTrace.state.phase === 'recording') {
+    return { success: false, error: 'Stop the playback trace before exporting it.' };
+  }
+  return {
+    success: true,
+    state: { ...playbackTrace.state },
+    events: [...playbackTrace.events],
+  };
+}
+
+async function deletePlaybackTrace(): Promise<PlaybackTraceResponse> {
+  await playbackTraceReady;
+  if (!playbackTrace) return { success: true };
+  if (playbackTrace.state.phase === 'recording') {
+    return { success: false, error: 'Stop the playback trace before deleting it.' };
+  }
+  const keys = [
+    PLAYBACK_TRACE_META_KEY,
+    ...Array.from(
+      { length: Math.ceil(playbackTrace.state.eventCount / PLAYBACK_TRACE_CHUNK_SIZE) },
+      (_, index) => getPlaybackTraceChunkKey(playbackTrace!.state.traceId, index),
+    ),
+  ];
+  await chrome.storage.local.remove(keys);
+  chrome.alarms.clear(`${PLAYBACK_TRACE_ALARM_PREFIX}${playbackTrace.state.traceId}`);
+  playbackTrace = undefined;
+  return { success: true };
+}
+
+async function finishPlaybackTrace(reason: PlaybackTraceEndReason, error?: string): Promise<void> {
+  const record = playbackTrace;
+  if (!record || record.state.phase !== 'recording' || record.stopping) return;
+  record.stopping = true;
+  record.state.endedAt = new Date().toISOString();
+  record.state.elapsedMs = Math.max(0, Date.now() - Date.parse(record.state.startedAt));
+  record.state.endReason = reason;
+  record.state.phase =
+    reason === 'manual'
+      ? 'completed'
+      : reason === 'duration-limit' || reason === 'event-limit' || reason === 'size-limit'
+        ? 'limit-ended'
+        : 'failed';
+  if (error) record.state.error = error;
+
+  chrome.alarms.clear(`${PLAYBACK_TRACE_ALARM_PREFIX}${record.state.traceId}`);
+  playbackTraceRequestIdsByTab.delete(record.state.tabId);
+  try {
+    await chrome.tabs.sendMessage(record.state.tabId, {
+      type: 'SET_PLAYBACK_TRACE_CONTENT',
+      active: false,
+    });
+  } catch (sendError) {
+    console.warn(
+      '[Service Worker] Could not stop content-script trace events:',
+      formatError(sendError),
+    );
+  }
+  if (record.debuggerAttached) {
+    const debuggee = { tabId: record.state.tabId };
+    if (record.debuggerEventListener) {
+      chrome.debugger.onEvent.removeListener(record.debuggerEventListener);
+      record.debuggerEventListener = undefined;
+    }
+    await chrome.debugger
+      .sendCommand(debuggee, 'Network.disable')
+      .catch((disableError) =>
+        console.warn(
+          '[Service Worker] Could not disable trace network events:',
+          formatError(disableError),
+        ),
+      );
+    await chrome.debugger
+      .detach(debuggee)
+      .catch((detachError) =>
+        console.warn(
+          '[Service Worker] Could not detach playback trace debugger:',
+          formatError(detachError),
+        ),
+      );
+    record.debuggerAttached = false;
+  }
+  await persistPlaybackTrace();
+  broadcastPlaybackTraceState();
+}
+
+function appendPlaybackTraceEvent(
+  input: Omit<PlaybackTraceEvent, 'sequence' | 'elapsedMs' | 'timestamp'> & {
+    timestamp?: string;
+  },
+): void {
+  const record = playbackTrace;
+  if (!record || record.state.phase !== 'recording') return;
+  const event: PlaybackTraceEvent = {
+    ...input,
+    sequence: record.events.length + 1,
+    timestamp: input.timestamp || new Date().toISOString(),
+    elapsedMs: Math.max(0, Date.now() - Date.parse(record.state.startedAt)),
+  };
+  const atCapacityPressure =
+    record.state.warning !== undefined ||
+    record.state.serializedBytes >= PLAYBACK_TRACE_MAX_BYTES * PLAYBACK_TRACE_WARNING_RATIO ||
+    record.state.eventCount >= PLAYBACK_TRACE_MAX_EVENTS * PLAYBACK_TRACE_WARNING_RATIO;
+  if (atCapacityPressure && tryCoalescePlaybackTraceEvent(record, event)) {
+    const previousWarning = record.state.warning;
+    updatePlaybackTraceWarning(record);
+    if (record.state.warning && !previousWarning) {
+      broadcastPlaybackTraceState();
+      void persistPlaybackTrace().catch((error) => {
+        console.error('[Service Worker] Failed to persist playback trace:', formatError(error));
+        void finishPlaybackTrace('error', `Trace persistence failed: ${formatError(error)}`);
+      });
+    }
+    record.pendingUpdates += 1;
+    if (record.pendingUpdates >= PLAYBACK_TRACE_PERSIST_BATCH_SIZE) {
+      void persistPlaybackTrace().catch((error) => {
+        console.error('[Service Worker] Failed to persist playback trace:', formatError(error));
+        void finishPlaybackTrace('error', `Trace persistence failed: ${formatError(error)}`);
+      });
+    }
+    return;
+  }
+
+  const eventSize = getPlaybackTraceEventSize(event);
+  const capReason = getPlaybackTraceLimitReason(
+    record.state.eventCount,
+    record.state.serializedBytes,
+    eventSize,
+  );
+  if (capReason) {
+    void finishPlaybackTrace(capReason);
+    return;
+  }
+
+  record.events.push(event);
+  record.state.eventCount += 1;
+  record.state.serializedBytes += eventSize;
+  record.state.elapsedMs = event.elapsedMs;
+  record.pendingUpdates += 1;
+  const previousWarning = record.state.warning;
+  updatePlaybackTraceWarning(record);
+  if (record.state.warning && !previousWarning) {
+    broadcastPlaybackTraceState();
+    void persistPlaybackTrace().catch((error) => {
+      console.error('[Service Worker] Failed to persist playback trace:', formatError(error));
+      void finishPlaybackTrace('error', `Trace persistence failed: ${formatError(error)}`);
+    });
+  }
+  const isHighPriorityEvent =
+    event.category === 'trace' ||
+    event.category === 'user' ||
+    event.category === 'interaction' ||
+    (event.category === 'playback' && event.name !== 'time_sample');
+  if (isHighPriorityEvent || record.pendingUpdates >= PLAYBACK_TRACE_PERSIST_BATCH_SIZE) {
+    void persistPlaybackTrace().catch((error) => {
+      console.error('[Service Worker] Failed to persist playback trace:', formatError(error));
+      void finishPlaybackTrace('error', `Trace persistence failed: ${formatError(error)}`);
+    });
+  }
+}
+
+function tryCoalescePlaybackTraceEvent(
+  record: PlaybackTraceRecord,
+  event: PlaybackTraceEvent,
+): boolean {
+  if (event.category !== 'network' || !['request', 'response'].includes(event.name)) return false;
+  const eventTime = Date.parse(event.timestamp);
+  const currentChunkStart =
+    Math.floor(Math.max(0, record.events.length - 1) / PLAYBACK_TRACE_CHUNK_SIZE) *
+    PLAYBACK_TRACE_CHUNK_SIZE;
+  const match = record.events
+    .slice(currentChunkStart)
+    .reverse()
+    .find(
+      (candidate) =>
+        candidate.category === event.category &&
+        candidate.name === event.name &&
+        candidate.url === event.url &&
+        candidate.method === event.method &&
+        candidate.resourceType === event.resourceType &&
+        candidate.status === event.status &&
+        candidate.mimeType === event.mimeType &&
+        eventTime - Date.parse(candidate.lastRepeatedAt || candidate.timestamp) >= 0 &&
+        eventTime - Date.parse(candidate.lastRepeatedAt || candidate.timestamp) <= 30_000,
+    );
+  if (!match) return false;
+
+  const priorSize = getPlaybackTraceEventSize(match);
+  const updated: PlaybackTraceEvent = {
+    ...match,
+    repeatCount: (match.repeatCount || 1) + 1,
+    lastRepeatedAt: event.timestamp,
+  };
+  const updatedSize = getPlaybackTraceEventSize(updated);
+  if (record.state.serializedBytes - priorSize + updatedSize > PLAYBACK_TRACE_MAX_BYTES) {
+    void finishPlaybackTrace('size-limit');
+    return true;
+  }
+  Object.assign(match, updated);
+  record.state.serializedBytes += updatedSize - priorSize;
+  record.state.elapsedMs = event.elapsedMs;
+  return true;
+}
+
+function updatePlaybackTraceWarning(record: PlaybackTraceRecord): void {
+  if (record.state.warning) return;
+  if (record.state.serializedBytes >= PLAYBACK_TRACE_MAX_BYTES * PLAYBACK_TRACE_WARNING_RATIO) {
+    record.state.warning = 'Trace is approaching its serialized-size limit.';
+  } else if (record.state.eventCount >= PLAYBACK_TRACE_MAX_EVENTS * PLAYBACK_TRACE_WARNING_RATIO) {
+    record.state.warning = 'Trace is approaching its event-count limit.';
+  }
+}
+
+function updatePlaybackTraceElapsed(): void {
+  if (playbackTrace?.state.phase === 'recording') {
+    playbackTrace.state.elapsedMs = Math.max(
+      0,
+      Date.now() - Date.parse(playbackTrace.state.startedAt),
+    );
+  }
+}
+
+function getPlaybackTraceChunkKey(traceId: string, index: number): string {
+  return `playbackTraceEvents:${traceId}:${index}`;
+}
+
+function persistPlaybackTrace(): Promise<void> {
+  const record = playbackTrace;
+  if (!record) return Promise.resolve();
+  updatePlaybackTraceElapsed();
+  const snapshot = { ...record.state };
+  const eventCount = record.events.length;
+  const pendingUpdates = record.pendingUpdates;
+  const chunkIndex = eventCount ? Math.floor((eventCount - 1) / PLAYBACK_TRACE_CHUNK_SIZE) : -1;
+  const chunkStart = chunkIndex < 0 ? 0 : chunkIndex * PLAYBACK_TRACE_CHUNK_SIZE;
+  const currentChunk = chunkIndex < 0 ? [] : record.events.slice(chunkStart, eventCount);
+  record.persistenceQueue = record.persistenceQueue.then(async () => {
+    const changes: Record<string, unknown> = { [PLAYBACK_TRACE_META_KEY]: snapshot };
+    if (chunkIndex >= 0) {
+      changes[getPlaybackTraceChunkKey(snapshot.traceId, chunkIndex)] = currentChunk;
+    }
+    await chrome.storage.local.set(changes);
+    record.lastPersistedEventCount = eventCount;
+    record.pendingUpdates = Math.max(0, record.pendingUpdates - pendingUpdates);
+    broadcastPlaybackTraceState();
+  });
+  return record.persistenceQueue;
+}
+
+function broadcastPlaybackTraceState(): void {
+  if (!playbackTrace) return;
+  updatePlaybackTraceElapsed();
+  const message = { type: 'PLAYBACK_TRACE_UPDATED', state: { ...playbackTrace.state } };
+  popupPorts.forEach((port) => {
+    try {
+      port.postMessage(message);
+    } catch (error) {
+      console.warn('[Service Worker] Could not update popup trace state:', formatError(error));
+    }
+  });
+}
+
+function handlePlaybackTraceDebuggerEvent(tabId: number, method: string, params?: object): void {
+  if (
+    !params ||
+    !playbackTrace ||
+    playbackTrace.state.phase !== 'recording' ||
+    playbackTrace.state.tabId !== tabId
+  ) {
+    return;
+  }
+
+  if (method === 'Network.requestWillBeSent') {
+    const event = params as {
+      requestId?: string;
+      request?: { url?: string; method?: string };
+      type?: string;
+      initiator?: { type?: string };
+    };
+    const url = event.request?.url;
+    if (!url || !isTraceResourceType(event.type)) return;
+    if (event.requestId) {
+      let requestIds = playbackTraceRequestIdsByTab.get(tabId);
+      if (!requestIds) {
+        requestIds = new Set();
+        playbackTraceRequestIdsByTab.set(tabId, requestIds);
+      }
+      if (requestIds.size >= 10_000) {
+        const oldestRequestId = requestIds.values().next().value;
+        if (oldestRequestId) requestIds.delete(oldestRequestId);
+      }
+      requestIds.add(event.requestId);
+    }
+    appendPlaybackTraceEvent({
+      category: 'network',
+      name: 'request',
+      url: redactPlaybackTraceUrl(url),
+      method: event.request?.method,
+      resourceType: event.type,
+      detail: event.initiator?.type ? `initiator:${event.initiator.type}` : undefined,
+    });
+    return;
+  }
+
+  if (method === 'Network.responseReceived') {
+    const event = params as {
+      requestId?: string;
+      type?: string;
+      response?: { url?: string; status?: number; mimeType?: string };
+    };
+    const url = event.response?.url;
+    if (
+      !url ||
+      !isTraceResourceType(event.type) ||
+      (event.requestId && !playbackTraceRequestIdsByTab.get(tabId)?.has(event.requestId))
+    )
+      return;
+    appendPlaybackTraceEvent({
+      category: 'network',
+      name: 'response',
+      url: redactPlaybackTraceUrl(url),
+      resourceType: event.type,
+      status: event.response?.status,
+      mimeType: event.response?.mimeType,
+    });
+    return;
+  }
+
+  if (method === 'Network.loadingFinished') {
+    const event = params as { requestId?: string; encodedDataLength?: number };
+    if (!event.requestId || !playbackTraceRequestIdsByTab.get(tabId)?.delete(event.requestId))
+      return;
+    appendPlaybackTraceEvent({
+      category: 'network',
+      name: 'request_finished',
+      encodedDataLength: event.encodedDataLength,
+    });
+    return;
+  }
+
+  if (method === 'Network.loadingFailed') {
+    const event = params as { requestId?: string };
+    if (!event.requestId || !playbackTraceRequestIdsByTab.get(tabId)?.delete(event.requestId))
+      return;
+    appendPlaybackTraceEvent({ category: 'network', name: 'request_failed' });
+  }
+}
+
+function attachPlaybackTraceEventListener(record: PlaybackTraceRecord): void {
+  const listener = (source: chrome.debugger.Debuggee, method: string, params?: object) => {
+    if (source.tabId !== undefined) {
+      handlePlaybackTraceDebuggerEvent(source.tabId, method, params);
+    }
+  };
+  record.debuggerEventListener = listener;
+  chrome.debugger.onEvent.addListener(listener);
+}
+
+function isTraceResourceType(type?: string): boolean {
+  return type === 'Document' || type === 'Media' || type === 'XHR' || type === 'Fetch';
 }
 
 function isCaptionRetrievalResponse(
@@ -874,6 +1512,9 @@ async function captureCaptionSourcesWithDebugger(
   tabId: number,
   discovery: CaptionDiscoveryResponse,
 ): Promise<CdpCaptureResult> {
+  if (playbackTrace?.state.phase === 'recording' && playbackTrace.state.tabId === tabId) {
+    throw new Error('Stop Playback Trace before starting caption CDP monitoring on this tab.');
+  }
   if (debuggerCapturesByTab.has(tabId))
     throw new Error('A caption capture is already active for this tab.');
   const debuggee = { tabId };

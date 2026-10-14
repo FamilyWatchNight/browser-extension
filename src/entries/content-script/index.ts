@@ -6,6 +6,7 @@ import type {
   CaptionRetrievalResponse,
   CaptionSourceCandidate,
   ContentScriptMessage,
+  PlaybackTraceContentEvent,
   ScreenshotResponse,
   VideoElement,
 } from '../../shared/messages';
@@ -26,6 +27,7 @@ import {
   normalizeNativeTrack,
 } from '../../shared/utils/caption-normalize';
 import { findAllVideos } from '../../shared/utils/dom-query';
+import { PLAYBACK_TRACE_TIME_SAMPLE_INTERVAL_MS } from '../../shared/utils/playback-trace';
 import { createVideoElementSnapshot, setupVideoListeners } from '../../shared/utils/video-element';
 
 const detectedVideos: Map<string, HTMLVideoElement> = new Map();
@@ -34,12 +36,15 @@ const documentObservers: Map<Document, MutationObserver> = new Map();
 const iframeLoadHandlers: Map<HTMLIFrameElement, () => void> = new Map();
 const publishedCaptionCandidateKeys = new Set<string>();
 const observedCaptionResourceUrls = new Set<string>();
+const playbackTraceVideoCleanups = new Map<HTMLVideoElement, () => void>();
+const playbackTraceLastSamples = new Map<HTMLVideoElement, number>();
 let refreshTimer: ReturnType<typeof setTimeout> | undefined;
 let metadataTimer: ReturnType<typeof setTimeout> | undefined;
 let captionDiscoveryTimer: ReturnType<typeof setTimeout> | undefined;
 let captionResourceObserver: PerformanceObserver | undefined;
 let captionObserverWarningLogged = false;
 let nextObservedCandidateId = 1;
+let playbackTraceActive = false;
 let activeAudioRecorder: MediaRecorder | undefined;
 let activeAudioStream: MediaStream | undefined;
 let audioChunks: Blob[] = [];
@@ -167,6 +172,121 @@ function refreshDetectedVideos() {
       videoCleanups.set(video, setupVideoListeners(video, scheduleMetadataUpdate));
     }
   });
+
+  syncPlaybackTraceVideoListeners();
+}
+
+function syncPlaybackTraceVideoListeners() {
+  for (const [video, cleanup] of playbackTraceVideoCleanups) {
+    if (!playbackTraceActive || !video.isConnected || !detectedVideos.has(videoIdFor(video))) {
+      cleanup();
+      playbackTraceVideoCleanups.delete(video);
+      playbackTraceLastSamples.delete(video);
+    }
+  }
+  if (!playbackTraceActive) return;
+
+  detectedVideos.forEach((video) => {
+    if (playbackTraceVideoCleanups.has(video)) return;
+    let previousMediaTime = Number.isFinite(video.currentTime) ? video.currentTime : 0;
+    let seekStartTime = previousMediaTime;
+    const listener = (event: Event) => {
+      const now = performance.now();
+      const isTimeSample = event.type === 'timeupdate';
+      const previousSample = playbackTraceLastSamples.get(video);
+      if (
+        isTimeSample &&
+        previousSample !== undefined &&
+        now - previousSample < PLAYBACK_TRACE_TIME_SAMPLE_INTERVAL_MS
+      ) {
+        previousMediaTime = Number.isFinite(video.currentTime)
+          ? video.currentTime
+          : previousMediaTime;
+        return;
+      }
+      if (isTimeSample) playbackTraceLastSamples.set(video, now);
+
+      const mediaTime = Number.isFinite(video.currentTime) ? video.currentTime : 0;
+      if (event.type === 'seeking') seekStartTime = previousMediaTime;
+      const detail =
+        event.type === 'seeking' || event.type === 'seeked' ? 'origin:unknown' : undefined;
+      publishPlaybackTraceContentEvent({
+        name: isTimeSample ? 'time_sample' : event.type,
+        videoId: videoIdFor(video),
+        timestamp: new Date().toISOString(),
+        mediaTime,
+        ...(event.type === 'seeking' || event.type === 'seeked'
+          ? { previousMediaTime: event.type === 'seeked' ? seekStartTime : previousMediaTime }
+          : {}),
+        duration: Number.isFinite(video.duration) ? video.duration : 0,
+        paused: video.paused,
+        detail,
+      });
+      previousMediaTime = mediaTime;
+    };
+    const eventNames = [
+      'play',
+      'playing',
+      'pause',
+      'seeking',
+      'seeked',
+      'timeupdate',
+      'loadedmetadata',
+      'durationchange',
+      'loadstart',
+      'emptied',
+      'waiting',
+      'ratechange',
+    ];
+    eventNames.forEach((name) => video.addEventListener(name, listener));
+    playbackTraceVideoCleanups.set(video, () => {
+      eventNames.forEach((name) => video.removeEventListener(name, listener));
+    });
+    publishPlaybackTraceContentEvent({
+      name: 'video_discovered',
+      videoId: videoIdFor(video),
+      timestamp: new Date().toISOString(),
+      mediaTime: previousMediaTime,
+      duration: Number.isFinite(video.duration) ? video.duration : 0,
+      paused: video.paused,
+    });
+  });
+}
+
+function publishPlaybackTraceContentEvent(event: PlaybackTraceContentEvent): void {
+  chrome.runtime
+    .sendMessage({ type: 'PLAYBACK_TRACE_CONTENT_EVENT', event })
+    .catch((error) => console.warn('[Content Script] Could not send playback trace event:', error));
+}
+
+function handlePlaybackTracePageClick(event: MouseEvent): void {
+  const target = event.target instanceof Element ? event.target : undefined;
+  const role = target?.getAttribute('role');
+  const mediaTimes = Array.from(detectedVideos.entries()).map(([videoId, video]) => ({
+    videoId,
+    currentTime: Number.isFinite(video.currentTime) ? video.currentTime : 0,
+  }));
+  publishPlaybackTraceContentEvent({
+    name: 'page_click',
+    timestamp: new Date().toISOString(),
+    mediaTimes,
+    interaction: {
+      type: 'click',
+      isTrusted: event.isTrusted,
+      targetTag: target?.tagName.toLowerCase() || 'unknown',
+      ...(role && /^[a-z-]{1,32}$/i.test(role) ? { targetRole: role } : {}),
+      clientX: Math.round(event.clientX),
+      clientY: Math.round(event.clientY),
+      button: event.button,
+    },
+  });
+}
+
+function videoIdFor(video: HTMLVideoElement): string {
+  for (const [id, candidate] of detectedVideos) {
+    if (candidate === video) return id;
+  }
+  return 'unknown-video';
 }
 
 function scheduleRefresh() {
@@ -267,6 +387,20 @@ function registerMessageListener() {
     console.log('[Content Script] Received message:', message.type);
 
     switch (message.type) {
+      case 'SET_PLAYBACK_TRACE_CONTENT':
+        playbackTraceActive = message.active;
+        if (!playbackTraceActive) {
+          document.removeEventListener('click', handlePlaybackTracePageClick, true);
+          playbackTraceVideoCleanups.forEach((cleanup) => cleanup());
+          playbackTraceVideoCleanups.clear();
+          playbackTraceLastSamples.clear();
+        } else {
+          document.addEventListener('click', handlePlaybackTracePageClick, true);
+          refreshDetectedVideos();
+        }
+        sendResponse({ success: true });
+        return true;
+
       case 'GET_VIDEO_ELEMENTS':
         refreshDetectedVideos();
         handleGetVideoElements(sendResponse);
@@ -324,6 +458,9 @@ function initializeContentScript() {
   syncDocumentObservers();
   observeCaptionResources();
   scheduleCaptionDiscoveryUpdate();
+  chrome.runtime.sendMessage({ type: 'PLAYBACK_TRACE_CONTENT_READY' }).catch((error) => {
+    console.warn('[Content Script] Could not announce playback trace readiness:', error);
+  });
 }
 
 function handleGetVideoElements(sendResponse: (data: VideoElement[]) => void) {

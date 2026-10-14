@@ -5,11 +5,14 @@ import type {
   CaptionDiscoveryResponse,
   CaptionRetrievalResponse,
   ExtensionState,
+  PlaybackTraceResponse,
+  PlaybackTraceState,
   ScreenshotBounds,
   VideoElement,
 } from '../../shared/messages';
 import { exportNormalizedWebVtt } from '../../shared/utils/caption-normalize';
 import { connectToServiceWorker } from '../../shared/utils/extension-api';
+import { PLAYBACK_TRACE_MAX_DURATION_MS } from '../../shared/utils/playback-trace';
 import { useExtensionStore } from '../../state/store';
 
 export default function PopupApp() {
@@ -30,6 +33,9 @@ export default function PopupApp() {
   const [captionRetrievingId, setCaptionRetrievingId] = useState<string | undefined>();
   const [captionRetrievalErrors, setCaptionRetrievalErrors] = useState<Record<string, string>>({});
   const [captionCdpActionLoading, setCaptionCdpActionLoading] = useState(false);
+  const [playbackTraceState, setPlaybackTraceState] = useState<PlaybackTraceState>();
+  const [playbackTraceBusy, setPlaybackTraceBusy] = useState(false);
+  const [playbackTraceError, setPlaybackTraceError] = useState<string>();
   const [, setPort] = useState<chrome.runtime.Port | null>(null);
 
   const updateVideos = useCallback((videos: VideoElement[]) => {
@@ -79,7 +85,7 @@ export default function PopupApp() {
     let activeTabId: number | undefined;
     const handlePortMessage = (message: {
       type: string;
-      state: ExtensionState | CaptionCaptureState;
+      state: ExtensionState | CaptionCaptureState | PlaybackTraceState;
       tabId?: number;
     }) => {
       if (message.type === 'STATE_UPDATED') {
@@ -97,6 +103,11 @@ export default function PopupApp() {
         setCaptionRetrievingIds(state.retrievingCandidateIds);
         setCaptionProbeLoading(state.phase === 'discovering');
         setCaptionProbeError(state.error);
+      } else if (
+        message.type === 'PLAYBACK_TRACE_UPDATED' &&
+        activeTabId === (message.state as PlaybackTraceState).tabId
+      ) {
+        setPlaybackTraceState(message.state as PlaybackTraceState);
       }
     };
     newPort.onMessage.addListener(handlePortMessage);
@@ -105,6 +116,7 @@ export default function PopupApp() {
       if (!tab.id) return;
       activeTabId = tab.id;
       newPort.postMessage({ type: 'REQUEST_CAPTION_STATE', tabId: tab.id });
+      newPort.postMessage({ type: 'REQUEST_PLAYBACK_TRACE_STATE', tabId: tab.id });
     });
     fetchVideoElements();
 
@@ -113,6 +125,60 @@ export default function PopupApp() {
       newPort.disconnect();
     };
   }, [fetchVideoElements, updateVideos]);
+
+  async function runPlaybackTraceAction(action: 'start' | 'stop' | 'export' | 'delete') {
+    setPlaybackTraceBusy(true);
+    setPlaybackTraceError(undefined);
+    try {
+      const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+      const tabId =
+        action === 'export' || action === 'delete'
+          ? undefined
+          : action === 'start'
+            ? tab.id
+            : (playbackTraceState?.tabId ?? tab.id);
+      if (action !== 'export' && action !== 'delete' && tabId === undefined) {
+        throw new Error('No active tab is available for playback tracing.');
+      }
+      const request =
+        action === 'start'
+          ? { type: 'START_PLAYBACK_TRACE', tabId }
+          : action === 'stop'
+            ? { type: 'STOP_PLAYBACK_TRACE', tabId }
+            : action === 'export'
+              ? { type: 'EXPORT_PLAYBACK_TRACE' }
+              : { type: 'DELETE_PLAYBACK_TRACE' };
+      const response = (await chrome.runtime.sendMessage(request)) as PlaybackTraceResponse;
+      if (response?.state) setPlaybackTraceState(response.state);
+      if (!response?.success)
+        throw new Error(response?.error || 'Playback trace operation failed.');
+
+      if (action === 'delete') {
+        setPlaybackTraceState(undefined);
+      }
+
+      if (action === 'export' && response.state && response.events) {
+        const artifact = JSON.stringify(
+          { schemaVersion: 1, state: response.state, events: response.events },
+          null,
+          2,
+        );
+        const objectUrl = URL.createObjectURL(
+          new Blob([artifact], { type: 'application/json;charset=utf-8' }),
+        );
+        const link = document.createElement('a');
+        link.href = objectUrl;
+        link.download = `playback-trace-${response.state.traceId}.json`;
+        link.click();
+        window.setTimeout(() => URL.revokeObjectURL(objectUrl), 1000);
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      setPlaybackTraceError(message);
+    } finally {
+      setPlaybackTraceBusy(false);
+    }
+  }
 
   async function controlVideo(action: 'play' | 'pause' | 'skip') {
     const selectedVideo = localVideos.find((video) => video.id === selectedVideoId);
@@ -454,6 +520,91 @@ export default function PopupApp() {
         </label>
       </div>
 
+      <section
+        aria-label="Playback Trace"
+        style={{
+          marginBottom: '16px',
+          padding: '10px',
+          border: '1px solid #d1d5db',
+          borderRadius: '4px',
+        }}
+      >
+        <strong>Playback Trace</strong>
+        <div style={{ marginTop: '4px', fontSize: '12px', color: '#666' }}>
+          Captures redacted network metadata and playback events for up to{' '}
+          {PLAYBACK_TRACE_MAX_DURATION_MS / 60_000} minutes. Start before a video appears.
+        </div>
+        {playbackTraceState?.phase === 'recording' ? (
+          <>
+            <div role="status" style={{ marginTop: '8px', fontSize: '12px' }}>
+              Recording on tab {playbackTraceState.tabId}: {playbackTraceState.eventCount} events;{' '}
+              {(playbackTraceState.serializedBytes / (1024 * 1024)).toFixed(2)} MiB;{' '}
+              {formatTraceElapsed(playbackTraceState.elapsedMs)} elapsed.
+            </div>
+            <div style={{ marginTop: '4px', fontSize: '12px', color: '#666' }}>
+              Page clicks are recorded with coordinates and current video times. Seek events are
+              correlated separately; a click is not assumed to have caused a seek.
+            </div>
+            {playbackTraceState.warning && (
+              <div role="status" style={{ marginTop: '4px', color: '#92400e', fontSize: '12px' }}>
+                {playbackTraceState.warning}
+              </div>
+            )}
+            <button
+              onClick={() => void runPlaybackTraceAction('stop')}
+              disabled={playbackTraceBusy}
+              style={{ marginTop: '8px', padding: '8px' }}
+            >
+              Stop trace
+            </button>
+          </>
+        ) : playbackTraceState ? (
+          <>
+            <div role="status" style={{ marginTop: '8px', fontSize: '12px' }}>
+              Trace {playbackTraceState.phase.replace('-', ' ')} after{' '}
+              {formatTraceElapsed(playbackTraceState.elapsedMs)} with{' '}
+              {playbackTraceState.eventCount} events (
+              {(playbackTraceState.serializedBytes / (1024 * 1024)).toFixed(2)} MiB).
+              {playbackTraceState.endReason && ` End reason: ${playbackTraceState.endReason}.`}
+            </div>
+            {playbackTraceState.error && (
+              <div role="alert" style={{ marginTop: '4px', color: '#b91c1c', fontSize: '12px' }}>
+                {playbackTraceState.error}
+              </div>
+            )}
+            <div style={{ display: 'flex', gap: '8px', marginTop: '8px' }}>
+              <button
+                onClick={() => void runPlaybackTraceAction('export')}
+                disabled={playbackTraceBusy}
+                style={{ padding: '8px' }}
+              >
+                Export trace
+              </button>
+              <button
+                onClick={() => void runPlaybackTraceAction('delete')}
+                disabled={playbackTraceBusy}
+                style={{ padding: '8px' }}
+              >
+                Delete saved trace
+              </button>
+            </div>
+          </>
+        ) : (
+          <button
+            onClick={() => void runPlaybackTraceAction('start')}
+            disabled={playbackTraceBusy}
+            style={{ marginTop: '8px', padding: '8px' }}
+          >
+            {playbackTraceBusy ? 'Starting trace…' : 'Start Playback Trace'}
+          </button>
+        )}
+        {playbackTraceError && (
+          <div role="alert" style={{ marginTop: '6px', color: '#b91c1c', fontSize: '12px' }}>
+            {playbackTraceError}
+          </div>
+        )}
+      </section>
+
       {localVideos.length > 0 ? (
         <>
           <div style={{ marginBottom: '12px', fontSize: '12px', color: '#666' }}>
@@ -671,14 +822,10 @@ export default function PopupApp() {
                               <div>Request: GET with browser credentials included</div>
                             )}
                             {retrieval.failure.diagnostics.httpStatus !== undefined && (
-                              <div>
-                                HTTP status: {retrieval.failure.diagnostics.httpStatus}
-                              </div>
+                              <div>HTTP status: {retrieval.failure.diagnostics.httpStatus}</div>
                             )}
                             {retrieval.failure.diagnostics.contentType && (
-                              <div>
-                                Response type: {retrieval.failure.diagnostics.contentType}
-                              </div>
+                              <div>Response type: {retrieval.failure.diagnostics.contentType}</div>
                             )}
                             {retrieval.failure.diagnostics.responseBytes !== undefined && (
                               <div>
@@ -687,8 +834,8 @@ export default function PopupApp() {
                             )}
                             {retrieval.failure.diagnostics.stage === 'request' && (
                               <div>
-                                No HTTP response was exposed to the extension; the browser does
-                                not identify whether this was CORS, DNS, TLS, or another network
+                                No HTTP response was exposed to the extension; the browser does not
+                                identify whether this was CORS, DNS, TLS, or another network
                                 failure.
                               </div>
                             )}
@@ -773,4 +920,12 @@ function formatIgnoredReason(reason: string): string {
     default:
       return reason;
   }
+}
+
+function formatTraceElapsed(elapsedMs: number): string {
+  const totalSeconds = Math.floor(elapsedMs / 1000);
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+  return [hours, minutes, seconds].map((value) => String(value).padStart(2, '0')).join(':');
 }

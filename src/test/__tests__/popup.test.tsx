@@ -18,6 +18,20 @@ describe('popup video discovery', () => {
     vi.restoreAllMocks();
   });
 
+  it('offers Playback Trace before any video is discovered', async () => {
+    chromeFixture.chrome.tabs.sendMessage = vi.fn().mockResolvedValue([]);
+
+    render(<PopupApp />);
+
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    expect(screen.getByRole('region', { name: 'Playback Trace' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Start Playback Trace' })).toBeTruthy();
+    expect(screen.getByText(/Start before a video appears/)).toBeTruthy();
+  });
+
   it('retries when the page initially has no videos', async () => {
     const video = {
       id: 'video-1',

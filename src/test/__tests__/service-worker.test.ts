@@ -30,6 +30,7 @@ describe('service-worker message contracts', () => {
     chromeFixture.chrome.tabs.sendMessage = vi.fn((_tabId, _message, callback) => {
       callback(videos);
     });
+
     await import('../../entries/background/service-worker');
 
     const sendResponse = vi.fn();
@@ -48,6 +49,135 @@ describe('service-worker message contracts', () => {
       expect.any(Function),
     );
     expect(sendResponse).toHaveBeenCalledWith(videos);
+  });
+
+  it('captures and exports redacted metadata without reloading the tab', async () => {
+    await import('../../entries/background/service-worker');
+
+    const startResponse = vi.fn();
+    chromeFixture.messageListeners[0](
+      { type: 'START_PLAYBACK_TRACE', tabId: 42 },
+      {},
+      startResponse,
+    );
+    await vi.waitFor(() =>
+      expect(startResponse).toHaveBeenCalledWith(
+        expect.objectContaining({
+          success: true,
+          state: expect.objectContaining({ phase: 'recording', tabId: 42 }),
+        }),
+      ),
+    );
+    expect(chromeFixture.chrome.tabs.reload).not.toHaveBeenCalled();
+    expect(chromeFixture.chrome.alarms.create).toHaveBeenCalledWith(
+      expect.stringMatching(/^playbackTrace:/),
+      expect.objectContaining({ when: expect.any(Number) }),
+    );
+
+    const onDebuggerEvent = chromeFixture.debuggerEventListeners[0];
+    onDebuggerEvent({ tabId: 42 }, 'Network.requestWillBeSent', {
+      requestId: 'request-1',
+      type: 'Fetch',
+      request: {
+        method: 'GET',
+        url: 'https://media.example/dash/7f1d9b61-4d25-4f17-a053-e710a76db19b/manifest.mpd?token=private',
+      },
+    });
+    onDebuggerEvent({ tabId: 42 }, 'Network.responseReceived', {
+      requestId: 'request-1',
+      type: 'Fetch',
+      response: {
+        status: 200,
+        mimeType: 'application/dash+xml',
+        url: 'https://media.example/dash/7f1d9b61-4d25-4f17-a053-e710a76db19b/manifest.mpd?token=private',
+      },
+    });
+    onDebuggerEvent({ tabId: 42 }, 'Network.loadingFinished', {
+      requestId: 'request-1',
+      encodedDataLength: 1024,
+    });
+    chromeFixture.messageListeners[0](
+      {
+        type: 'PLAYBACK_TRACE_CONTENT_EVENT',
+        event: {
+          name: 'page_click',
+          timestamp: new Date().toISOString(),
+          mediaTimes: [{ videoId: 'video-1', currentTime: 31.5 }],
+          interaction: {
+            type: 'click',
+            isTrusted: true,
+            targetTag: 'div',
+            targetRole: 'slider',
+            clientX: 220,
+            clientY: 30,
+            button: 0,
+          },
+        },
+      },
+      { tab: { id: 42 } },
+      vi.fn(),
+    );
+
+    const stopResponse = vi.fn();
+    chromeFixture.messageListeners[0]({ type: 'STOP_PLAYBACK_TRACE', tabId: 42 }, {}, stopResponse);
+    await vi.waitFor(() =>
+      expect(stopResponse).toHaveBeenCalledWith(
+        expect.objectContaining({
+          success: true,
+          state: expect.objectContaining({ phase: 'completed', endReason: 'manual' }),
+        }),
+      ),
+    );
+
+    const exportResponse = vi.fn();
+    chromeFixture.messageListeners[0]({ type: 'EXPORT_PLAYBACK_TRACE' }, {}, exportResponse);
+    await vi.waitFor(() => expect(exportResponse).toHaveBeenCalled());
+    const exported = exportResponse.mock.calls[0][0];
+    expect(exported.events).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          name: 'request',
+          url: 'https://media.example/dash/<redacted>/manifest.mpd',
+        }),
+        expect.objectContaining({
+          name: 'response',
+          status: 200,
+          mimeType: 'application/dash+xml',
+        }),
+        expect.objectContaining({
+          category: 'interaction',
+          name: 'page_click',
+          mediaTimes: [{ videoId: 'video-1', currentTime: 31.5 }],
+        }),
+      ]),
+    );
+    expect(JSON.stringify(exported)).not.toContain('private');
+    expect(Object.keys(chromeFixture.localStorage)).toContain('playbackTraceMeta');
+  });
+
+  it('finalizes from the 150-minute alarm using the limit-ended status', async () => {
+    await import('../../entries/background/service-worker');
+
+    const startResponse = vi.fn();
+    chromeFixture.messageListeners[0](
+      { type: 'START_PLAYBACK_TRACE', tabId: 42 },
+      {},
+      startResponse,
+    );
+    await vi.waitFor(() => expect(startResponse).toHaveBeenCalled());
+    const traceId = startResponse.mock.calls[0][0].state.traceId;
+
+    chromeFixture.alarmListeners[0]({ name: `playbackTrace:${traceId}` });
+
+    await vi.waitFor(() => {
+      expect(chromeFixture.localStorage.playbackTraceMeta).toEqual(
+        expect.objectContaining({
+          phase: 'limit-ended',
+          endReason: 'duration-limit',
+        }),
+      );
+    });
+    expect(chromeFixture.chrome.alarms.clear).toHaveBeenCalledWith(`playbackTrace:${traceId}`);
   });
 
   it('stores video updates and broadcasts them to popup ports', async () => {
@@ -303,9 +433,7 @@ describe('service-worker message contracts', () => {
       },
     };
     chromeFixture.chrome.tabs.sendMessage = vi.fn((_tabId, message, callback) => {
-      callback(
-        message.type === 'DISCOVER_CAPTION_SOURCES' ? discovery : retrieval,
-      );
+      callback(message.type === 'DISCOVER_CAPTION_SOURCES' ? discovery : retrieval);
     });
 
     await import('../../entries/background/service-worker');
@@ -478,10 +606,7 @@ describe('service-worker message contracts', () => {
                 expect.objectContaining({
                   id: candidateWithoutUrl.id,
                   url: candidateWithUrl.url,
-                  evidence: [
-                    candidateWithoutUrl.evidence[0],
-                    candidateWithUrl.evidence[0],
-                  ],
+                  evidence: [candidateWithoutUrl.evidence[0], candidateWithUrl.evidence[0]],
                 }),
               ],
             }),

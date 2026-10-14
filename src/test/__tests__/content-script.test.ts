@@ -158,6 +158,7 @@ describe('content-script lifecycle', () => {
       currentTime: { configurable: true, value: 1 },
       paused: { configurable: true, value: true },
     });
+
     document.body.appendChild(video);
 
     await import('../../entries/content-script/index');
@@ -181,6 +182,89 @@ describe('content-script lifecycle', () => {
         }),
       ],
     });
+  });
+
+  it('captures video discovery and seek events only while a playback trace is active', async () => {
+    const video = document.createElement('video');
+    video.src = 'movie.mp4';
+    Object.defineProperty(video, 'currentTime', { configurable: true, writable: true, value: 4 });
+    Object.defineProperty(video, 'duration', { configurable: true, value: 120 });
+    document.body.appendChild(video);
+    await import('../../entries/content-script/index');
+
+    const traceResponse = vi.fn();
+    chromeFixture.messageListeners[0](
+      { type: 'SET_PLAYBACK_TRACE_CONTENT', active: true },
+      {},
+      traceResponse,
+    );
+    expect(traceResponse).toHaveBeenCalledWith({ success: true });
+
+    video.currentTime = 40;
+    video.dispatchEvent(new Event('seeking'));
+    video.dispatchEvent(new Event('seeked'));
+    const traceEvents = chromeFixture.sendMessage.mock.calls
+      .map(([message]) => message)
+      .filter((message) => message.type === 'PLAYBACK_TRACE_CONTENT_EVENT');
+
+    expect(traceEvents).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          type: 'PLAYBACK_TRACE_CONTENT_EVENT',
+          event: expect.objectContaining({
+            name: 'video_discovered',
+            mediaTime: 4,
+          }),
+        }),
+        expect.objectContaining({
+          type: 'PLAYBACK_TRACE_CONTENT_EVENT',
+          event: expect.objectContaining({
+            name: 'seeking',
+            mediaTime: 40,
+            previousMediaTime: 4,
+            detail: 'origin:unknown',
+          }),
+        }),
+        expect.objectContaining({
+          type: 'PLAYBACK_TRACE_CONTENT_EVENT',
+          event: expect.objectContaining({
+            name: 'seeked',
+            mediaTime: 40,
+            previousMediaTime: 4,
+            detail: 'origin:unknown',
+          }),
+        }),
+      ]),
+    );
+
+    const seekBar = document.createElement('button');
+    seekBar.setAttribute('role', 'slider');
+    document.body.appendChild(seekBar);
+    seekBar.dispatchEvent(
+      new MouseEvent('click', { bubbles: true, clientX: 220, clientY: 30, button: 0 }),
+    );
+    const pageClick = chromeFixture.sendMessage.mock.calls
+      .map(([message]) => message)
+      .find(
+        (message) =>
+          message.type === 'PLAYBACK_TRACE_CONTENT_EVENT' && message.event.name === 'page_click',
+      );
+    expect(pageClick).toEqual(
+      expect.objectContaining({
+        event: expect.objectContaining({
+          name: 'page_click',
+          mediaTimes: expect.arrayContaining([expect.objectContaining({ currentTime: 40 })]),
+          interaction: expect.objectContaining({
+            type: 'click',
+            isTrusted: false,
+            targetTag: 'button',
+            targetRole: 'slider',
+            clientX: 220,
+            clientY: 30,
+          }),
+        }),
+      }),
+    );
   });
 
   it('ranks a visible sourced video ahead of an empty video and controls the selected id', async () => {

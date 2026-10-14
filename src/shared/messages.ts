@@ -11,13 +11,19 @@ export type ContentScriptMessage =
   | { type: 'CAPTURE_SCREENSHOT'; videoId: string }
   | { type: 'START_AUDIO_CAPTURE'; videoId: string }
   | { type: 'STOP_AUDIO_CAPTURE' }
-  | { type: 'VIDEO_STATE_UPDATE'; videos: VideoElement[] };
+  | { type: 'VIDEO_STATE_UPDATE'; videos: VideoElement[] }
+  | { type: 'SET_PLAYBACK_TRACE_CONTENT'; active: boolean };
 
 // Message types sent from popup/options to background
 export type PopupMessage =
   | { type: 'UPDATE_SETTINGS'; settings: ExtensionSettings }
   | { type: 'REQUEST_STATE' }
   | { type: 'REQUEST_CAPTION_STATE'; tabId: number }
+  | { type: 'GET_PLAYBACK_TRACE_STATE'; tabId: number }
+  | { type: 'START_PLAYBACK_TRACE'; tabId: number }
+  | { type: 'STOP_PLAYBACK_TRACE'; tabId: number }
+  | { type: 'DELETE_PLAYBACK_TRACE' }
+  | { type: 'EXPORT_PLAYBACK_TRACE' }
   | { type: 'DISCOVER_CAPTION_SOURCES'; tabId: number }
   | {
       type: 'SET_CAPTION_CDP_MONITORING';
@@ -26,13 +32,87 @@ export type PopupMessage =
     }
   | { type: 'RETRIEVE_CAPTION_SOURCE'; tabId: number; candidateId: string }
   | { type: 'START_TAB_AUDIO_CAPTURE'; tabId: number }
-  | { type: 'STOP_TAB_AUDIO_CAPTURE' };
+  | { type: 'STOP_TAB_AUDIO_CAPTURE' }
+  | { type: 'PLAYBACK_TRACE_CONTENT_READY' }
+  | { type: 'PLAYBACK_TRACE_CONTENT_EVENT'; event: PlaybackTraceContentEvent };
 
 // Message types sent from background to popup/content script
 export type BackgroundMessage =
   | { type: 'STATE_UPDATED'; state: ExtensionState; tabId?: number }
   | { type: 'CAPTION_STATE_UPDATED'; state: CaptionCaptureState }
+  | { type: 'PLAYBACK_TRACE_UPDATED'; state: PlaybackTraceState }
   | { type: 'SETTINGS_CHANGED'; settings: ExtensionSettings };
+
+export type PlaybackTracePhase = 'recording' | 'completed' | 'limit-ended' | 'failed';
+
+export type PlaybackTraceEndReason =
+  'manual' | 'duration-limit' | 'event-limit' | 'size-limit' | 'debugger-detached' | 'error';
+
+export interface PlaybackTraceEvent {
+  sequence: number;
+  timestamp: string;
+  elapsedMs: number;
+  category: 'trace' | 'network' | 'playback' | 'interaction' | 'user';
+  name: string;
+  url?: string;
+  method?: string;
+  resourceType?: string;
+  status?: number;
+  mimeType?: string;
+  encodedDataLength?: number;
+  mediaTime?: number;
+  previousMediaTime?: number;
+  mediaTimes?: Array<{ videoId: string; currentTime: number }>;
+  interaction?: {
+    type: 'click';
+    isTrusted: boolean;
+    targetTag: string;
+    targetRole?: string;
+    clientX: number;
+    clientY: number;
+    button: number;
+  };
+  duration?: number;
+  paused?: boolean;
+  repeatCount?: number;
+  lastRepeatedAt?: string;
+  detail?: string;
+}
+
+export interface PlaybackTraceState {
+  traceId: string;
+  tabId: number;
+  phase: PlaybackTracePhase;
+  startedAt: string;
+  endedAt?: string;
+  elapsedMs: number;
+  eventCount: number;
+  serializedBytes: number;
+  bodyBytes: number;
+  warning?: string;
+  endReason?: PlaybackTraceEndReason;
+  error?: string;
+}
+
+export interface PlaybackTraceContentEvent {
+  name: string;
+  timestamp: string;
+  videoId?: string;
+  mediaTime?: number;
+  previousMediaTime?: number;
+  mediaTimes?: Array<{ videoId: string; currentTime: number }>;
+  interaction?: PlaybackTraceEvent['interaction'];
+  duration?: number;
+  paused?: boolean;
+  detail?: string;
+}
+
+export interface PlaybackTraceResponse {
+  success: boolean;
+  state?: PlaybackTraceState;
+  events?: PlaybackTraceEvent[];
+  error?: string;
+}
 
 // Types for video elements detected
 export interface VideoElement {

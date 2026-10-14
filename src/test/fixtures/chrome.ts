@@ -28,6 +28,8 @@ export function createChromeFixture() {
     (source: { tabId?: number }, method: string, params?: object) => unknown
   > = [];
   const sessionStorage: Record<string, unknown> = {};
+  const localStorage: Record<string, unknown> = {};
+  const alarmListeners: Array<(alarm: { name: string }) => unknown> = [];
   const sendMessage = vi.fn().mockResolvedValue(undefined);
   const port: PortFixture = {
     name: 'popup-port',
@@ -83,8 +85,19 @@ export function createChromeFixture() {
         set: vi.fn().mockResolvedValue(undefined),
       },
       local: {
-        get: vi.fn().mockResolvedValue({}),
-        set: vi.fn().mockResolvedValue(undefined),
+        get: vi.fn(async (keys?: string | string[]) => {
+          if (typeof keys === 'string') return { [keys]: localStorage[keys] };
+          if (Array.isArray(keys)) {
+            return Object.fromEntries(keys.map((key) => [key, localStorage[key]]));
+          }
+          return { ...localStorage };
+        }),
+        set: vi.fn(async (items: Record<string, unknown>) => {
+          Object.assign(localStorage, items);
+        }),
+        remove: vi.fn(async (keys: string | string[]) => {
+          (Array.isArray(keys) ? keys : [keys]).forEach((key) => delete localStorage[key]);
+        }),
       },
       onChanged: {
         addListener: vi.fn(),
@@ -117,13 +130,31 @@ export function createChromeFixture() {
           : Promise.resolve(undefined),
       ),
       onEvent: {
-        addListener: vi.fn((listener: (source: { tabId?: number }, method: string, params?: object) => unknown) => {
+        addListener: vi.fn(
+          (listener: (source: { tabId?: number }, method: string, params?: object) => unknown) => {
           debuggerEventListeners.push(listener);
-        }),
-        removeListener: vi.fn((listener: (source: { tabId?: number }, method: string, params?: object) => unknown) => {
+          },
+        ),
+        removeListener: vi.fn(
+          (listener: (source: { tabId?: number }, method: string, params?: object) => unknown) => {
           const index = debuggerEventListeners.indexOf(listener);
           if (index >= 0) debuggerEventListeners.splice(index, 1);
+          },
+        ),
+      },
+      onDetach: {
+        addListener: vi.fn(),
+        removeListener: vi.fn(),
+      },
+    },
+    alarms: {
+      create: vi.fn(),
+      clear: vi.fn().mockResolvedValue(true),
+      onAlarm: {
+        addListener: vi.fn((listener: (alarm: { name: string }) => unknown) => {
+          alarmListeners.push(listener);
         }),
+        removeListener: vi.fn(),
       },
     },
   };
@@ -135,9 +166,11 @@ export function createChromeFixture() {
     portMessageListeners,
     portDisconnectListeners,
     debuggerEventListeners,
+    alarmListeners,
     sendMessage,
     port,
     sessionStorage,
+    localStorage,
     reset() {
       messageListeners.length = 0;
       vi.clearAllMocks();
