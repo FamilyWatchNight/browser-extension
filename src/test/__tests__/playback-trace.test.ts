@@ -86,14 +86,17 @@ describe('playback trace utilities', () => {
 
   it('sanitizes HLS playlist URIs and enforces the manifest document limit', () => {
     const manifest = sanitizePlaybackManifest(
-      '#EXTM3U\n#EXT-X-TARGETDURATION:6\n#EXT-X-KEY:METHOD=AES-128,URI="https://key.example/key?token=secret"\n#EXTINF:6.0,\nhttps://cdn.example/segment.ts?token=secret\n',
+      '#EXTM3U\n#EXT-X-TARGETDURATION:6\n#EXT-X-KEY:METHOD=SAMPLE-AES-CTR,URI="https://key.example/key?token=secret",KEYID=0x8DD2BF316DEA47289C74E00495593D22,KEYFORMAT="urn:uuid:edef8ba9-79d6-4ace-a3c8-27dcd51d21ed"\n#EXTINF:6.0,\nhttps://cdn.example/segment.ts?token=secret\n',
     );
 
     expect(manifest?.format).toBe('hls');
     expect(manifest?.text).toContain('#EXT-X-TARGETDURATION:6');
     expect(manifest?.text).toContain('URI="[redacted]"');
+    expect(manifest?.text).toContain('KEYID="[redacted]"');
+    expect(manifest?.text).toContain('KEYFORMAT="urn:uuid:edef8ba9-79d6-4ace-a3c8-27dcd51d21ed"');
     expect(manifest?.text).toContain('[redacted-uri]');
     expect(manifest?.text).not.toContain('secret');
+    expect(manifest?.text).not.toContain('8DD2BF316DEA47289C74E00495593D22');
     expect(
       sanitizePlaybackManifest(
         `<MPD>${'x'.repeat(PLAYBACK_TRACE_MAX_MANIFEST_BYTES - 11)}</MPD>`,

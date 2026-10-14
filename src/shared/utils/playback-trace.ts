@@ -132,7 +132,7 @@ function sanitizeHlsManifest(source: string): string {
         return line.replace(
           /\b(URI|SERVER-URI)\s*=\s*(["'])[^"']*\2/gi,
           (_match, name: string, quote: string) => `${name}=${quote}[redacted]${quote}`,
-        );
+        ).replace(/\bKEYID\s*=\s*(?:"[^"]*"|'[^']*'|[^,\s]*)/gi, 'KEYID="[redacted]"');
       }
       return '[redacted-uri]';
     })
