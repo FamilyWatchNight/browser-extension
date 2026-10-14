@@ -84,7 +84,7 @@ describe('playback trace utilities', () => {
     expect(manifest?.byteLength).toBe(new TextEncoder().encode(manifest?.text).byteLength);
   });
 
-  it('sanitizes HLS playlist URIs and rejects oversized or non-manifest bodies', () => {
+  it('sanitizes HLS playlist URIs and enforces the manifest document limit', () => {
     const manifest = sanitizePlaybackManifest(
       '#EXTM3U\n#EXT-X-TARGETDURATION:6\n#EXT-X-KEY:METHOD=AES-128,URI="https://key.example/key?token=secret"\n#EXTINF:6.0,\nhttps://cdn.example/segment.ts?token=secret\n',
     );
@@ -95,7 +95,14 @@ describe('playback trace utilities', () => {
     expect(manifest?.text).toContain('[redacted-uri]');
     expect(manifest?.text).not.toContain('secret');
     expect(
-      sanitizePlaybackManifest(`<MPD>${'x'.repeat(PLAYBACK_TRACE_MAX_MANIFEST_BYTES)}</MPD>`),
+      sanitizePlaybackManifest(
+        `<MPD>${'x'.repeat(PLAYBACK_TRACE_MAX_MANIFEST_BYTES - 11)}</MPD>`,
+      )?.byteLength,
+    ).toBe(PLAYBACK_TRACE_MAX_MANIFEST_BYTES);
+    expect(
+      sanitizePlaybackManifest(
+        `<MPD>${'x'.repeat(PLAYBACK_TRACE_MAX_MANIFEST_BYTES - 10)}</MPD>`,
+      ),
     ).toBeUndefined();
     expect(sanitizePlaybackManifest('<MPD mediaPresentationDuration="PT90S">')).toBeUndefined();
     expect(sanitizePlaybackManifest('<html><body>not a manifest</body></html>')).toBeUndefined();
