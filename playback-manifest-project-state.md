@@ -52,25 +52,25 @@ should prioritize these goals in order:
    needed; the display must not imply that an ad-inflated player duration is
    the movie's content duration. Keep the timer live while the popup remains
    open.
-3. Detect when an advertisement is playing from observable behavior, without
-   provider identification.
-4. When ad playback is detected, show `Ad` right-aligned in that timer row.
-5. When possible, estimate the remaining time in the current ad block. A
-   block may contain multiple ads; do not confuse the active ad's remaining
-   duration with the whole block's remaining duration.
-6. When block time is known, show `[0]0:00` immediately after `Ad` in the
-   same right-aligned element.
-7. When possible, estimate how long remains before the next ad begins while
-   content is playing. This is optional and may require player-exposed
-   schedule clues.
-8. When that estimate is available, show `[00:0]0:00` as a right-aligned
-   countdown in the timer row.
-9. Provide a user-invoked **Export analysis** action that produces a
+3. Provide a user-invoked **Export analysis** action that produces a
    shareable diagnostic document explaining what the extension observed, how
    it interpreted those observations, the conclusions and confidence levels,
    and the evidence/reasoning behind them. It should help diagnose unexpected
    timer or ad behavior without requiring a raw playback trace or another
    person to reproduce the session.
+4. Detect when an advertisement is playing from observable behavior, without
+   provider identification.
+5. When ad playback is detected, show `Ad` right-aligned in that timer row.
+6. When possible, estimate the remaining time in the current ad block. A
+   block may contain multiple ads; do not confuse the active ad's remaining
+   duration with the whole block's remaining duration.
+7. When block time is known, show `[0]0:00` immediately after `Ad` in the
+   same right-aligned element.
+8. When possible, estimate how long remains before the next ad begins while
+   content is playing. This is optional and may require player-exposed
+   schedule clues.
+9. When that estimate is available, show `[00:0]0:00` as a right-aligned
+   countdown in the timer row.
 
 All timing and classification must be possible from ordinary extension/page
 observations without attaching the debugger or entering CDP mode. One decimal
@@ -465,25 +465,26 @@ observations.
   extension's intended analysis needs pod-level boundaries and duration, not
   identification or parsing of individual ads within a pod:
 
-  | Candidate pod | Starts at | Scheduled duration |
-  | --- | ---: | ---: |
-  | 1 | 00:20:25.800 | 150.757 s |
-  | 2 | 00:31:22.124 | 150.159 s |
-  | 3 | 00:41:24.316 | 146.189 s |
-  | 4 | 00:54:08.605 | 150.331 s |
-  | 5 | 01:05:08.603 | 150.621 s |
-  | 6 | 01:15:33.824 | 150.294 s |
-  | 7 | 01:25:23.718 | 150.322 s |
-  | 8 | 01:39:53.040 | 150.096 s |
-  | 9 | 01:49:56.336 | 150.392 s |
-  | 10 | 02:03:35.228 | 150.058 s |
-  | 11 | 02:14:05.252 | 150.326 s |
+  | Candidate pod |    Starts at | Scheduled duration |
+  | ------------- | -----------: | -----------------: |
+  | 1             | 00:20:25.800 |          150.757 s |
+  | 2             | 00:31:22.124 |          150.159 s |
+  | 3             | 00:41:24.316 |          146.189 s |
+  | 4             | 00:54:08.605 |          150.331 s |
+  | 5             | 01:05:08.603 |          150.621 s |
+  | 6             | 01:15:33.824 |          150.294 s |
+  | 7             | 01:25:23.718 |          150.322 s |
+  | 8             | 01:39:53.040 |          150.096 s |
+  | 9             | 01:49:56.336 |          150.392 s |
+  | 10            | 02:03:35.228 |          150.058 s |
+  | 11            | 02:14:05.252 |          150.326 s |
 
   Together, those runs total 1,649.545 seconds (27:29.545) of scheduled
   candidate pod time within the 8,577.511-second (2:22:57.511) presentation.
   This is the schedule encoded by this captured MPD under the working
   hypothesis, not a guarantee that every pod or ad will be served or played
   in a later session.
+
 - At elapsed 106.17 seconds, the user's timeline click was followed by a
   seek to media time 7,415 seconds. The MPD has a marked period boundary at
   7,415.228 seconds, only about 0.23 seconds later. Seven consecutive
