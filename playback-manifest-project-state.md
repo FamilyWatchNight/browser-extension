@@ -4,12 +4,14 @@ Last updated: 2026-10-15
 
 ## Purpose
 
-Develop an evidence-driven, cross-service strategy for discovering and
-interpreting playback manifests and the media timeline they describe. The
-strategy should help distinguish program content from inserted advertisements
-and ultimately explain how timed captions align with each part of playback.
+Develop an evidence-driven, cross-service strategy for tracking
+content-relative playback time independently of inserted advertisements, so
+timestamped content tags can later be interpreted reliably. Manifest
+discovery and interpretation remain useful supporting evidence for the media
+timeline and caption alignment, but the first runtime solution should work
+from ordinary page behavior without depending on manifest access.
 
-The intended experiment workflow is a one-click **Playback Trace** that can be
+The investigation used a one-click **Playback Trace** that can be
 started on a service tab before the extension has discovered a video element.
 Some services may begin with an ad as soon as the player/video becomes
 available, so video discovery must not be a prerequisite for arming capture.
@@ -20,12 +22,61 @@ these experiments, the expected maximum movie duration including ads is 150
 minutes; reaching that limit should stop and finalize the trace exactly as if
 the user had clicked Stop.
 
+Broad additional capture and manifest-discovery work is paused. The current
+focus is to turn the evidence already gathered into a non-CDP, behavior-driven
+content playhead and progressive ad indicators, as described below.
+
 This is an exploration note, not a claim that the extension currently parses
 manifest timing semantics or identifies ads automatically. It can retain
 bounded, structurally validated, sanitized DASH/HLS manifest text for
 inspection. Record observations as **confirmed**,
 **disproven**, or **unknown**. Keep provider-specific details separate from
 cross-service conclusions.
+
+## Product goals
+
+The next product capability is an ad-independent, content-relative playhead
+that can later drive timestamped content tags. Design and implementation
+should prioritize these goals in order:
+
+1. Maintain an internal content playhead updated to one-tenth-second
+   resolution. It should represent how far into the movie's content playback
+   is, excluding inserted ad time whenever observable behavior permits. Do
+   not select rules based on service or platform identity; use observed video
+   elements, playback state, duration changes, time progression, transitions,
+   and other generic signals.
+2. While the popup is open, display the playhead and total movie duration in
+   a row immediately above the buttons. The left side uses
+   `[00:0]0:00.0 / [00:0]0:00`: current content position to tenths of a
+   second, then total content duration to whole seconds. Hours expand as
+   needed; the display must not imply that an ad-inflated player duration is
+   the movie's content duration. Keep the timer live while the popup remains
+   open.
+3. Detect when an advertisement is playing from observable behavior, without
+   provider identification.
+4. When ad playback is detected, show `Ad` right-aligned in that timer row.
+5. When possible, estimate the remaining time in the current ad block. A
+   block may contain multiple ads; do not confuse the active ad's remaining
+   duration with the whole block's remaining duration.
+6. When block time is known, show `[0]0:00` immediately after `Ad` in the
+   same right-aligned element.
+7. When possible, estimate how long remains before the next ad begins while
+   content is playing. This is optional and may require player-exposed
+   schedule clues.
+8. When that estimate is available, show `[00:0]0:00` as a right-aligned
+   countdown in the timer row.
+9. Provide a user-invoked **Export analysis** action that produces a
+   shareable diagnostic document explaining what the extension observed, how
+   it interpreted those observations, the conclusions and confidence levels,
+   and the evidence/reasoning behind them. It should help diagnose unexpected
+   timer or ad behavior without requiring a raw playback trace or another
+   person to reproduce the session.
+
+All timing and classification must be possible from ordinary extension/page
+observations without attaching the debugger or entering CDP mode. One decimal
+place is a display/update resolution, not a promise of 100 ms measurement
+accuracy. Preserve uncertainty internally; when evidence is insufficient,
+prefer an unavailable value to a falsely precise timer or ad label.
 
 Related context: [caption-capture-project-state.md](caption-capture-project-state.md)
 records the caption-discovery work and current provider evidence. YouTube,
@@ -43,10 +94,11 @@ discontinuities, and any ad transitions. A complete caption workflow may need
 to determine whether a cue belongs to program content, an ad, or an
 unclassified portion of playback.
 
-Manifest interpretation is therefore a prerequisite to designing a reliable
-Pluto caption strategy, and a likely shared capability across services. It
-must not assume that all providers expose ads in the same way, that a manifest
-is always accessible to the page, or that every manifest marker unambiguously
+Manifest interpretation may help design a reliable Pluto caption strategy
+and can provide supporting timing evidence across services. It is not a
+prerequisite for the initial content-clock feature. The approach must not
+assume that all providers expose ads in the same way, that a manifest is
+always accessible to the page, or that every manifest marker unambiguously
 identifies an ad.
 
 Efficient experiments also need a causal timeline. A user may seek forward to
@@ -54,6 +106,189 @@ trigger an ad, while the seek itself or the resulting downloads and player
 events can resemble an automatic ad transition. Trace records should make
 user interventions visible and time-correlated with playback/network events,
 without claiming causality from correlation alone.
+
+## Strategy
+
+Treat the requested playhead as a normalized **content clock**, distinct from
+any individual media element's `currentTime`, the wall clock, or the player's
+reported duration. Use a small shared state model rather than a service
+classifier:
+
+- **Candidate media:** Observe all accessible `<video>` elements and their
+  current time, duration, paused/ended state, playback rate, dimensions,
+  visibility, source changes, and events. Rank likely active presentation
+  media using several signals together: visible rendered area, nonzero
+  duration, recent time progression, audible/playing state, and whether other
+  candidates are paused or tiny. A small preview video should not win just
+  because it is playing. Re-evaluate as elements appear, disappear, or swap
+  roles. Keep the chosen element provisional when evidence conflicts.
+- **Content clock:** When the selected element is confidently carrying
+  content and its media time is a reliable content timeline, follow that time
+  and round only for display. Otherwise maintain a monotonic accumulated
+  content clock from observed elapsed playback, excluding intervals
+  classified as ads. Pause it while content is paused or buffering; re-anchor
+  it on a seek, source replacement, or timeline discontinuity rather than
+  blindly adding wall time. Track seek origin as unknown unless a trusted
+  interaction or explicit player signal supports an attribution. Never
+  silently treat a large jump as ordinary playback.
+- **Duration baseline:** Maintain a history of each candidate's duration and
+  source/lifecycle. A stable duration observed before an insertion can be a
+  candidate content-duration baseline. If the same element's duration later
+  grows while playback resets or switches to an ad, the increase is evidence
+  of inserted duration, not proof by itself. Conversely, if a separate short
+  ad element appears while the main element pauses and retains its duration
+  and time, keep the main content clock frozen and treat the ad as a separate
+  clock. If the first observation already includes an ad or the title is
+  resumed, do not infer the clean content duration by guessing. Show total
+  duration only when it can be separated credibly from ad time.
+- **Transitions and confidence:** Represent observations such as
+  `content`, `possible-ad`, `ad`, and `unknown` with confidence and evidence
+  provenance. Combine independent clues; do not promote one weak clue to a
+  definite classification. Clear/reassess state after seek, source change,
+  page navigation, or active-element replacement. Preserve enough recent
+  transition history to avoid confusing a paused background/preview with the
+  current movie.
+
+### Behavioral heuristics
+
+Prefer direct, generic observations first:
+
+1. **Strong evidence for an ad:** A visible active player/video explicitly
+   labeled `Ad` or `Advertisement` in accessible text/ARIA; an exposed
+   skippable-ad control; or a short-lived active video that replaces/overlays
+   the main content while the content element pauses or holds its playhead.
+   Combine the cue with a coherent transition into and out of the interval.
+2. **Useful supporting evidence:** Abrupt change in selected media element,
+   source, duration, or timeline; a short duration followed by a reset to the
+   longer-lived content element; content time held constant while another
+   element advances; or a sudden duration increase aligned with a playback
+   reset. These are clues, not service-independent proofs: previews, trailers,
+   chapter transitions, seeking, and source rebuffering can resemble them.
+3. **Weak evidence only:** A duration jump alone, a sudden time discontinuity,
+   a cluster of requests, or a long pause. Do not label an ad from any one of
+   these. Request metadata may be unavailable without CDP and ad-decision
+   calls can occur when no ad is served.
+4. **When signals disagree:** Mark the interval `unknown` or `possible-ad`,
+   avoid subtracting unconfirmed time from the content clock, and retain the
+   raw observed media time separately. A visible timer can show the best
+   content-clock estimate while internal confidence makes limitations
+   explicit; if the estimate is not meaningful, use an unavailable display
+   instead of fabricating precision.
+
+### Explainable analysis and export
+
+Treat the diagnostic report as an explanation of the runtime model, not a
+dump of everything the browser observed. The implementation should retain a
+bounded, privacy-minimized evidence ledger for decisions that affect the
+content clock or ad indicators. For each meaningful transition or estimate,
+record:
+
+- The conclusion (for example, selected content element, content-relative
+  position, possible/confirmed ad state, block time remaining, or unknown).
+- The observed facts that informed it: relative timestamps, media time and
+  duration before/after, paused/playing state, source or element changes,
+  visible/accessibility clues, and relevant seek/reset transitions.
+- The inference rule or concise reason applied, including which signals were
+  considered strong, supporting, or weak.
+- Confidence as a clear qualitative level (high/medium/low/unknown) with a
+  short rationale. Do not imply calibrated statistical probability unless
+  there is evidence for one.
+- Competing explanations, missing observations, and why a value was accepted,
+  downgraded, or left unavailable.
+
+The exported document should present a readable summary first, followed by a
+compact chronological sequence of evidence and interpretations. Include the
+content-clock estimate and any ad/countdown state at key transitions, plus
+the current reasoning version so reports from different iterations can be
+compared. Keep enough provenance to reproduce the calculation, but omit
+unrelated DOM data, arbitrary page text, full network traces, response bodies,
+signed URLs, tokens, cookies, account/title details, and raw user input.
+Prefer relative elapsed times and normalized event labels. The user explicitly
+invokes export and can inspect the document before sharing it; exporting must
+not transmit it automatically. The report should state that its conclusions
+are heuristic, identify gaps, and distinguish directly observed facts from
+inferences.
+
+An implementation can keep the ledger in memory during active playback and
+bound its event count/retention window. Export need not include every
+per-frame time update: summarize stable intervals and retain detailed
+evidence around state changes, seeks, source changes, and confidence changes.
+This keeps the report useful without creating another unbounded playback
+trace. The report is a planned diagnostic feature, not implemented behavior.
+
+### Ad-block and next-ad estimates
+
+- For one active ad, remaining time can be estimated from its duration minus
+  its current time, provided the element is actually the ad and its duration
+  is stable. This is only the active ad's remaining time.
+- For a multi-ad block, prefer a visible generic player countdown or
+  accessible label that explicitly says how much time remains in the ad
+  break. If the player exposes a total block duration or a complete schedule
+  through accessible page state, that may also support a countdown. Do not
+  assume that summing current/known ad durations gives the full pod: later ads
+  may not yet be loaded, and skipped ads change the remaining time.
+- Before the next ad, only show a countdown when an observable player cue
+  provides a future boundary and a usable relation to the content clock. A
+  visible timeline marker, accessible schedule, or a parsable manifest
+  boundary may be a candidate. Merely seeing an ad-related request or an
+  earlier average interval is not enough. Otherwise leave this optional
+  indicator absent.
+- Render each optional estimate only while its evidence remains current.
+  Discard/recompute after a skip, seek, ad transition, duration change, or
+  source replacement. Do not let a countdown continue through a state change
+  as if it were authoritative.
+
+### Non-CDP observation and separately retrievable data
+
+The runtime path should rely first on ordinary content-script observations:
+video element properties/events, visibility and layout, accessible labels and
+controls in the page DOM, native text tracks, and normal extension messages
+that keep popup state fresh. A content script can also inspect
+`PerformanceResourceTiming` for resource names/timing when exposed, but this
+reveals metadata, not response bodies, and cross-origin detail may be
+restricted. Do not add CDP-only dependencies to the playhead/ad logic.
+
+Some data may be retrievable separately, analogous to caption retrieval, if
+the page exposes a resource and existing extension permissions and browser
+access rules allow it:
+
+- Text tracks or subtitle files (for example WebVTT, TTML, or segmented
+  captions), useful for later alignment with the content clock.
+- DASH MPDs or HLS playlists when an accessible resource URL and permitted
+  fetch path are available; sanitized timing/period/segment structure may
+  provide useful boundaries, but the file need not identify ads reliably.
+- Small, explicitly filtered player/configuration or schedule metadata, but
+  only when a response can be fetched through a supported non-CDP path and
+  reduced to safe fields. Do not retain a full watch response, signed URL,
+  token, media body, or arbitrary API payload for this feature.
+
+Page-visible DOM or accessible labels are the most promising generic source
+for current ad and pod countdowns. Native video properties are the most
+promising baseline for current content position. A separately fetched
+manifest or caption file is supporting evidence, not a prerequisite. If the
+browser does not expose a response body without CDP, do not attempt to bypass
+CORS or extension permissions; the feature should degrade gracefully.
+
+### Experiments and calibration
+
+Pause additional data gathering for now. When implementation begins, use the
+existing captures as offline behavioral cases and add deterministic tests for
+the state model: one main video, a tiny moving preview, separate ad video
+with content paused, same-element duration expansion, ad-first observation,
+resume into saved progress, seek during content, skip during an ad, buffering,
+and ambiguous source/duration changes. Verify that only confirmed ad
+intervals are excluded from content time and that the clock does not drift
+while paused or buffering.
+
+For later live fine-tuning, collect short, targeted, no-CDP checks only where
+a specific uncertainty remains. Compare the displayed tenth-second clock to
+the player/content position before, during, and after an ad; test titles with
+and without resume progress; try both separate-element and same-element
+transitions; and compare visible ad/pod countdowns to measured wall time,
+including skipped ads. Record false positives and false negatives as well as
+successful detection. Do not restart broad manifest discovery unless those
+tests expose a concrete gap that cannot be handled by ordinary page
+observations.
 
 ## Current evidence
 
@@ -567,40 +802,37 @@ Prefer a bounded local trace artifact containing only sanitized metadata and
 validated, minimal text excerpts needed for analysis; avoid retaining raw
 network dumps by default.
 
-## Open questions and next steps
+## Current focus and parked research
 
-- Establish a repeatable way to identify and read candidate playback manifests
-  without assuming access to a particular browser debugging mechanism, with
-  an arming action that works before any video element is discovered.
-- Live-validate the implemented one-click trace lifecycle, 150-minute stop,
-  storage caps and overflow behavior, early attachment, local persistence,
-  export, and click/seek correlation. In particular, verify whether clicks
-  inside each platform's player frame are observable.
-  - Reproduce the reported first-start reload immediately after browser startup
-    and after an extension update. Confirm the installed extension directory and
-    version, note whether the page or extension/service worker reloads, and
-    inspect the popup state plus `playbackTraceMeta` in `chrome.storage.local`
-    after the first click. Compare that with the explicit reload performed by
-    caption CDP retrieval; do not add another-click or automatic-reload behavior
-    until the path causing this discrepancy is identified.
-- Refine redaction narrowly enough to preserve safe non-URL DASH descriptor
-  identifiers, then determine the meaning of Pluto's repeated
-  `InbandEventStream` descriptor and compare it with the observed ad pods.
-- Relate Pluto caption period references to `text/en-cc/*.m4s` requests and
-  the post-ad media-time jump.
-- With captions explicitly enabled, capture Tubi around a later ad break to
-  see whether caption requests/cues pause with movie time, appear for ads, or
-  resume with the movie.
-- Capture a YouTube session on a movie without saved resume progress and let
-  an ad play through (or skip it after noting its displayed duration). Compare
-  the ad and content media requests with the player’s ad-break signal, the
-  saved/current content position, and timed-text requests. Compare the
-  bounded `get_watch` and `ad_break` summaries across an ad and no-ad session;
-  first determine why the latest `get_watch` body exceeded the pre-read size
-  guard despite its 143,154-byte encoded transfer length. Keep the response
-  size ceiling and avoid retaining full bodies.
-- Based on these results, decide what a minimal shared representation must
-  preserve and which semantics belong in provider-specific parsing.
+Additional service experiments and broad manifest gathering are paused at the
+user's request. The evidence record above is the current basis for design, not
+a claim that every heuristic is already validated.
+
+The logical next development work is to implement the shared observable-media
+model and internal content clock before adding popup presentation. Use
+offline fixtures from the existing Amazon, Pluto, Tubi, and YouTube traces,
+plus synthetic transitions, to test video-element selection, pause/buffer
+handling, seeks, resume offsets, duration changes, separate ad elements,
+same-element timeline changes, uncertainty handling, and evidence-ledger
+explanations. Then add the popup row, optional ad labels/countdowns, and
+user-invoked analysis export in priority order, making sure the report can
+explain a surprising or low-confidence result. Do not schedule new manifest
+experiments unless implementation tests reveal a concrete unresolved behavior
+that blocks a prioritized goal.
+
+The following questions remain parked rather than active data-gathering tasks:
+
+- Can the content clock be mapped reliably through a same-element stitched
+  ad transition when no clean content-duration baseline was observed?
+- Which accessible DOM/ARIA clues are common enough to identify an active ad
+  or a pod-wide countdown, and how often are they absent or misleading?
+- Can any page-exposed, non-CDP schedule or manifest boundary provide a safe,
+  trustworthy next-ad countdown? Until demonstrated, omit that indicator.
+- Which Pluto descriptor identifiers can be retained safely if future
+  manifest interpretation becomes necessary?
+- Does YouTube's safe response summary produce useful fields after correcting
+  the unexplained size-guard skip? This is not required for the first
+  behavior-driven implementation and should remain parked.
 
 ## Playback Trace implementation status
 
@@ -687,31 +919,24 @@ a visible marker/request is not proof that an ad was delivered. This remains
 strong evidence from one title, not a general cross-service normalization
 rule.
 
-The Pluto run has now broadened the evidence beyond Amazon. Its captured
-stitched MPD strongly supports the user's breakpoint-then-resume hypothesis:
-the timeline seek lands within a fraction of a second of a marked-period
-boundary, the marked periods there total about 150 seconds, and playback
-automatically jumps forward from just beyond the following program-period
-boundary about as that pod ends. The requested destination time is not
-captured, so the mapping from the clicked timeline coordinate to resumed
-content position remains to be tested.
+The Pluto run broadened the evidence beyond Amazon. Its captured stitched MPD
+supports a breakpoint-then-resume hypothesis: a timeline seek landed within a
+fraction of a second of a descriptor-bearing period boundary, the marked
+periods there total about 150 seconds, and playback automatically jumped
+forward from just beyond the following program-period boundary about as that
+pod ended. The exact requested destination remains unknown.
 
-Next, inspect the sanitized MPD's in-band event representation and caption
-period references. The current URL sanitizer redacts `schemeIdUri` values,
-which can carry non-secret format identifiers as well as actual URLs; refine
-this narrowly so safe URNs/descriptor identifiers can be retained without
-exposing resource URLs or credentials. Keep the 1 MiB per-document and 2 MiB
-aggregate text limits, URL redaction, and DRM removal. Treat contiguous
-descriptor-bearing periods as one pod for timeline analysis; parsing
-individual ads within the pod is not required for the extension's purpose.
-Then recapture Pluto with captions explicitly enabled, if possible, to check
-whether ad periods have any caption traffic/cues and whether the post-ad
-destination tracks the intended timeline target.
+Across services, observed ad behavior differs: Tubi played ads in another
+video element while content time held; Amazon's main duration grew alongside
+interstitial delivery; Pluto represented candidate pods as periods on a
+stitched timeline; and YouTube exposed short ad playback timelines before
+loading a saved movie position. These observations motivate a generic
+state-based design, but they do not prove one universal ad detector or
+normalization formula. In particular, total-duration arithmetic alone cannot
+locate ad intervals or reconstruct content-relative time.
 
-Further Amazon work is still useful but can be targeted: parse sanitized MPD
-segment timestamps to map content positions across its two content portions,
-or determine what `getVideoAds` returns when a marked break is skipped.
-Across both providers, distinguish requests and measurement beacons from
-media actually played. The current implementation captures and redacts
-manifest text but does not parse timeline semantics or classify ad/content
-periods. No further click-timing instrumentation is planned.
+Manifest parsing, provider-specific response interpretation, and further
+network experiments are not prerequisites for the initial non-CDP
+implementation. Keep the current trace and sanitizer as research tools; do
+not make the popup timer depend on CDP attachment or on the unresolved
+YouTube response summaries.
