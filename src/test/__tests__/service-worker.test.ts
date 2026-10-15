@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+import type { PlaybackTraceEvent } from '../../shared/messages';
 import { createChromeFixture } from '../fixtures/chrome';
 
 describe('service-worker message contracts', () => {
@@ -281,6 +282,136 @@ describe('service-worker message contracts', () => {
     );
     expect(JSON.stringify(exported)).not.toContain('private');
     expect(JSON.stringify(exported)).not.toContain('https://cdn.example');
+  });
+
+  it('captures safe summaries for YouTube watch and ad-break JSON responses only', async () => {
+    const responseBodies: Record<string, string> = {
+      'watch-1': JSON.stringify({
+        playerAds: { adBreaks: [{ startTime: 300, duration: 28, isSkippable: true }] },
+        signedMediaUrl: 'https://media.example/video?signature=private',
+      }),
+      'ad-break-1': JSON.stringify({
+        adBreaks: [{ startTime: 900, duration: 30, adType: 'midroll', adId: 'private-id' }],
+      }),
+    };
+    let responseBodyIndex = 0;
+    vi.spyOn(chromeFixture.chrome.debugger, 'sendCommand').mockImplementation(
+      (_debuggee, method) =>
+        method === 'Network.getResponseBody'
+          ? Promise.resolve({
+              body: Object.values(responseBodies)[responseBodyIndex++],
+              base64Encoded: false,
+            })
+          : Promise.resolve(undefined),
+    );
+    await import('../../entries/background/service-worker');
+
+    const startResponse = vi.fn();
+    chromeFixture.messageListeners[0](
+      { type: 'START_PLAYBACK_TRACE', tabId: 42 },
+      {},
+      startResponse,
+    );
+    await vi.waitFor(() => expect(startResponse).toHaveBeenCalled());
+
+    const onDebuggerEvent = chromeFixture.debuggerEventListeners[0];
+    const responses = [
+      {
+        requestId: 'watch-1',
+        path: '/youtubei/v1/get_watch',
+      },
+      {
+        requestId: 'ad-break-1',
+        path: '/youtubei/v1/player/ad_break',
+      },
+    ];
+    for (const { requestId, path } of responses) {
+      const url = `https://www.youtube.com${path}?token=private`;
+      onDebuggerEvent({ tabId: 42 }, 'Network.requestWillBeSent', {
+        requestId,
+        type: 'Fetch',
+        request: { method: 'POST', url },
+      });
+      onDebuggerEvent({ tabId: 42 }, 'Network.responseReceived', {
+        requestId,
+        type: 'Fetch',
+        response: {
+          status: 200,
+          mimeType: 'application/json',
+          url,
+          headers: { 'content-length': '256' },
+        },
+      });
+      onDebuggerEvent({ tabId: 42 }, 'Network.loadingFinished', {
+        requestId,
+        encodedDataLength: 256,
+      });
+    }
+
+    const unrelatedResponse = 'https://www.youtube.com/youtubei/v1/player/other';
+    onDebuggerEvent({ tabId: 42 }, 'Network.requestWillBeSent', {
+      requestId: 'other-1',
+      type: 'Fetch',
+      request: { method: 'POST', url: unrelatedResponse },
+    });
+    onDebuggerEvent({ tabId: 42 }, 'Network.responseReceived', {
+      requestId: 'other-1',
+      type: 'Fetch',
+      response: {
+        status: 200,
+        mimeType: 'application/json',
+        url: unrelatedResponse,
+      },
+    });
+    onDebuggerEvent({ tabId: 42 }, 'Network.loadingFinished', {
+      requestId: 'other-1',
+      encodedDataLength: 256,
+    });
+
+    const stopResponse = vi.fn();
+    chromeFixture.messageListeners[0]({ type: 'STOP_PLAYBACK_TRACE', tabId: 42 }, {}, stopResponse);
+    await vi.waitFor(() =>
+      expect(stopResponse).toHaveBeenCalledWith(
+        expect.objectContaining({
+          success: true,
+          state: expect.objectContaining({ phase: 'completed' }),
+        }),
+      ),
+    );
+    const exportResponse = vi.fn();
+    chromeFixture.messageListeners[0]({ type: 'EXPORT_PLAYBACK_TRACE' }, {}, exportResponse);
+    await vi.waitFor(() => expect(exportResponse).toHaveBeenCalled());
+
+    const exported = exportResponse.mock.calls[0][0];
+    const summaries = exported.events.filter(
+      (event: PlaybackTraceEvent) => event.name === 'youtube_ad_response_summary',
+    );
+    expect(summaries).toHaveLength(2);
+    expect(summaries).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          detail: 'get_watch',
+          responseSummary: expect.arrayContaining([
+            { path: 'playerAds.adBreaks[0].startTime', value: 300 },
+            { path: 'playerAds.adBreaks[0].duration', value: 28 },
+          ]),
+        }),
+        expect.objectContaining({
+          detail: 'ad_break',
+          responseSummary: expect.arrayContaining([
+            { path: 'adBreaks[0].startTime', value: 900 },
+            { path: 'adBreaks[0].duration', value: 30 },
+          ]),
+        }),
+      ]),
+    );
+    expect(JSON.stringify(exported)).not.toContain('private');
+    expect(JSON.stringify(exported)).not.toContain('media.example');
+    expect(
+      vi
+        .mocked(chromeFixture.chrome.debugger.sendCommand)
+        .mock.calls.filter(([, method]) => method === 'Network.getResponseBody'),
+    ).toHaveLength(2);
   });
 
   it('finalizes from the 150-minute alarm using the limit-ended status', async () => {

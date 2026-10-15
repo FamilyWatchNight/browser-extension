@@ -1,6 +1,6 @@
 # Playback manifest discovery and processing: project state
 
-Last updated: 2026-10-13
+Last updated: 2026-10-15
 
 ## Purpose
 
@@ -61,6 +61,53 @@ without claiming causality from correlation alone.
 
 - Caption discovery, retrieval, and normalization are user-confirmed for
   YouTube, Prime Video, and Tubi, as described in the related project note.
+- A YouTube Playback Trace ran for about 36 seconds after the user armed it
+  and clicked a previously watched movie. The player first exposed the movie's
+  7,165.167-second duration (1:59:25.167) and sought to 7,001 seconds
+  (1:56:41), consistent with resuming near the end of the movie. Before that
+  saved position played, the player state reset through `emptied`/`loadstart`
+  and reported an ad duration of 28.081 seconds. The trusted button click was
+  recorded at an ad media time of about 15.70 seconds; within about 150 ms,
+  playback state reset again, and the movie returned at 7,001 seconds.
+  This aligns with the user's report that the click was Skip and that the
+  movie resumed near the final credits. The same reported movie duration
+  returned, so this trace does not show an ad duration being added to the
+  movie's duration. The pre-ad seek to the saved position and post-ad return
+  to that same position make resume behavior a key confounder when comparing
+  ad timing with the film timeline.
+- YouTube network metadata around this transition includes a successful
+  `youtubei/v1/player/ad_break` request/response, advertising measurement
+  requests, `googlevideo.com/videoplayback` traffic (including a response
+  typed `application/vnd.yt-ump`), and successful `api/timedtext` requests
+  both around the ad startup and after Skip. These records support using
+  provider/player signals and playback state alongside manifest evidence.
+  They do not establish which media request carried the ad, what the timed
+  text contained, or whether captions were shown during the ad.
+- No DASH or HLS manifest was captured in this YouTube trace, and it retained
+  no response bodies. The observed YouTube playback request/signaling path
+  therefore cannot yet be interpreted as a manifest timeline; the absence of
+  a captured manifest does not prove that YouTube used no manifest or
+  equivalent stream description.
+- In a second YouTube trace, the user again opened a previously watched movie.
+  The player reported an initial 15.041-second ad timeline, then a separate
+  75.361-second ad timeline. The user reports that the first ad was
+  non-skippable and skipped the second as soon as Skip became available. The
+  trusted button click was recorded with the ad video's current time at about
+  6.44 seconds; the next player reset was followed by the movie loading and
+  seeking to 314 seconds (5:14), then playing from there. This is consistent
+  with an opening two-ad sequence before resuming saved movie progress; the
+  trace does not record the saved position before the ads, so it cannot show
+  whether the ads affected that position.
+- That trace includes a successful `get_watch` response but no captured
+  `youtube_ad_response_summary`: the capture was skipped as
+  `response-over-size-limit`. The recorded encoded transfer length was
+  143,154 bytes, but the skip event does not say whether a larger
+  `Content-Length` value or another size measurement triggered the 512 KiB
+  pre-read guard. No `/youtubei/v1/player/ad_break` request appears in this
+  trace. Consequently, this ad-bearing run provides no response-body evidence
+  about eligibility, ad selection, or scheduled timing; the pair of ad
+  durations is observed from player state, not a manifest or response
+  summary.
 - A Tubi Playback Trace ran for 13 minutes 5 seconds. The user armed it on the
   home screen, clicked a movie in the carousel, and captured playback on the
   resulting page without reloading the whole page after arming. The movie
@@ -544,6 +591,14 @@ network dumps by default.
 - With captions explicitly enabled, capture Tubi around a later ad break to
   see whether caption requests/cues pause with movie time, appear for ads, or
   resume with the movie.
+- Capture a YouTube session on a movie without saved resume progress and let
+  an ad play through (or skip it after noting its displayed duration). Compare
+  the ad and content media requests with the player’s ad-break signal, the
+  saved/current content position, and timed-text requests. Compare the
+  bounded `get_watch` and `ad_break` summaries across an ad and no-ad session;
+  first determine why the latest `get_watch` body exceeded the pre-read size
+  guard despite its 143,154-byte encoded transfer length. Keep the response
+  size ceiling and avoid retaining full bodies.
 - Based on these results, decide what a minimal shared representation must
   preserve and which semantics belong in provider-specific parsing.
 
@@ -560,7 +615,14 @@ platforms remain unverified in Chrome.**
   traffic. It reads response bodies only for successful candidate DASH/HLS
   requests and retains them only after format validation and URL redaction;
   arbitrary responses, media segments, DRM/license URLs, and HLS key IDs are not
-  retained.
+  retained. It also reads successful JSON responses only from YouTube's
+  `/youtubei/v1/get_watch` and `/youtubei/v1/player/ad_break` endpoints, when
+  the reported response size is within 512 KiB. It retains a bounded summary
+  (up to 100 fields) of ad-decision booleans, safe categorical values, and
+  ad-context timing numbers—not the response body, free-form strings, URLs,
+  IDs, or tokens. These YouTube summaries are implemented, but the latest
+  ad-bearing trace's `get_watch` response was skipped by the size guard and no
+  `ad_break` response occurred, so their live usefulness remains unvalidated.
 - When a video is discovered, the content script records initial state,
   play/pause, seek, source/lifecycle events, and a media-time sample at most
   every 15 seconds. While active, it also records page clicks with
@@ -571,7 +633,7 @@ platforms remain unverified in Chrome.**
   segments. Captured manifest text also redacts resource URLs, BaseURL,
   query-bearing attribute values, DRM ContentProtection/PSSH and license
   elements, and HLS KEYID values while retaining timing and structural fields.
-  Click text, form values, headers, cookies, and non-manifest body contents are
+  Click text, form values, headers, cookies, and non-target response bodies are
   not captured. Top-level document clicks are observable; clicks inside
   cross-origin frames may not be.
 - Events persist in bounded chunks in `chrome.storage.local`; the popup
@@ -586,7 +648,8 @@ platforms remain unverified in Chrome.**
   while retaining repeat count. Routine time samples are already thinned.
   Reaching a hard cap finalizes and marks the trace limit-ended.
 
-Focused automated coverage verifies URL redaction, cap calculations,
+Focused automated coverage verifies URL redaction, YouTube response-summary
+allowlisting and bounds, cap calculations,
 pre-video popup availability, network metadata recording, event export,
 150-minute alarm finalization, manifest validation/sanitization, body capture,
 and video/seek/page-click event collection. The third and fourth Amazon traces

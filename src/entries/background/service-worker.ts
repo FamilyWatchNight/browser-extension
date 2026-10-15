@@ -32,12 +32,14 @@ import {
   PLAYBACK_TRACE_MAX_DURATION_MS,
   PLAYBACK_TRACE_MAX_EVENTS,
   PLAYBACK_TRACE_MAX_MANIFEST_BYTES,
+  PLAYBACK_TRACE_MAX_YOUTUBE_RESPONSE_BYTES,
   PLAYBACK_TRACE_PERSIST_BATCH_SIZE,
   PLAYBACK_TRACE_WARNING_RATIO,
   getPlaybackTraceEventSize,
   getPlaybackTraceLimitReason,
   redactPlaybackTraceUrl,
   sanitizePlaybackManifest,
+  summarizeYouTubeAdResponse,
 } from '../../shared/utils/playback-trace';
 import { useExtensionStore } from '../../state/store';
 
@@ -86,7 +88,7 @@ type PlaybackTraceRecord = {
   persistenceQueue: Promise<void>;
   lastPersistedEventCount: number;
   pendingUpdates: number;
-  pendingManifestCaptures: Set<Promise<void>>;
+  pendingResponseCaptures: Set<Promise<void>>;
 };
 
 let playbackTrace: PlaybackTraceRecord | undefined;
@@ -1021,7 +1023,7 @@ async function restorePlaybackTrace(): Promise<void> {
     persistenceQueue: Promise.resolve(),
     lastPersistedEventCount: Math.min(events.length, state.eventCount),
     pendingUpdates: 0,
-    pendingManifestCaptures: new Set(),
+    pendingResponseCaptures: new Set(),
   };
   playbackTraceRequestsByTab.set(state.tabId, new Map());
 
@@ -1093,7 +1095,7 @@ async function startPlaybackTrace(tabId: number): Promise<PlaybackTraceResponse>
     persistenceQueue: Promise.resolve(),
     lastPersistedEventCount: 0,
     pendingUpdates: 0,
-    pendingManifestCaptures: new Set(),
+    pendingResponseCaptures: new Set(),
   };
   playbackTraceRequestsByTab.set(tabId, new Map());
 
@@ -1196,7 +1198,7 @@ async function finishPlaybackTrace(reason: PlaybackTraceEndReason, error?: strin
       formatError(sendError),
     );
   }
-  await Promise.allSettled([...record.pendingManifestCaptures]);
+  await Promise.allSettled([...record.pendingResponseCaptures]);
   if (record.debuggerAttached) {
     const debuggee = { tabId: record.state.tabId };
     await chrome.debugger
@@ -1512,12 +1514,14 @@ function handlePlaybackTraceDebuggerEvent(tabId: number, method: string, params?
       encodedDataLength: event.encodedDataLength,
     });
     if (request.status && request.status >= 200 && request.status < 300) {
-      const capture = capturePlaybackManifest(tabId, event.requestId, request);
+      const capture = isPotentialPlaybackManifest(request.url, request.mimeType)
+        ? capturePlaybackManifest(tabId, event.requestId, request)
+        : captureYouTubeAdResponse(tabId, event.requestId, request);
       const record = playbackTrace;
       if (record) {
-        record.pendingManifestCaptures.add(capture);
-        void capture.finally(() => record.pendingManifestCaptures.delete(capture)).catch((error) => {
-          console.error('[Service Worker] Manifest capture failed:', formatError(error));
+        record.pendingResponseCaptures.add(capture);
+        void capture.finally(() => record.pendingResponseCaptures.delete(capture)).catch((error) => {
+          console.error('[Service Worker] Playback response capture failed:', formatError(error));
         });
       }
     }
@@ -1633,6 +1637,115 @@ async function capturePlaybackManifest(
       console.error('[Service Worker] Failed to persist captured manifest:', formatError(error));
       void finishPlaybackTrace('error', `Manifest persistence failed: ${formatError(error)}`);
     });
+  }
+}
+
+async function captureYouTubeAdResponse(
+  tabId: number,
+  requestId: string,
+  request: PlaybackTraceRequest,
+): Promise<void> {
+  const responseKind = getYouTubeAdResponseKind(request.url, request.mimeType);
+  if (!responseKind) return;
+  const record = playbackTrace;
+  if (!record || record.state.phase !== 'recording' || record.state.tabId !== tabId) return;
+  const responseSizeKnown =
+    request.contentLength !== undefined || request.encodedDataLength !== undefined;
+  const byteLength = Math.max(request.contentLength ?? 0, request.encodedDataLength ?? 0);
+  if (!responseSizeKnown || byteLength > PLAYBACK_TRACE_MAX_YOUTUBE_RESPONSE_BYTES) {
+    appendPlaybackTraceEvent({
+      category: 'network',
+      name: 'youtube_ad_response_skipped',
+      url: redactPlaybackTraceUrl(request.url),
+      method: request.method,
+      resourceType: request.resourceType,
+      status: request.status,
+      mimeType: request.mimeType,
+      encodedDataLength: request.encodedDataLength,
+      detail: byteLength === undefined ? 'response-size-unavailable' : 'response-over-size-limit',
+    });
+    return;
+  }
+
+  let source: string;
+  try {
+    const responseBody = (await chrome.debugger.sendCommand(
+      { tabId },
+      'Network.getResponseBody',
+      { requestId },
+    )) as { body: string; base64Encoded?: boolean };
+    source = responseBody.base64Encoded ? decodeBase64Utf8(responseBody.body) : responseBody.body;
+  } catch (error) {
+    console.warn('[Service Worker] Could not read YouTube ad response:', formatError(error));
+    appendPlaybackTraceEvent({
+      category: 'network',
+      name: 'youtube_ad_response_skipped',
+      url: redactPlaybackTraceUrl(request.url),
+      method: request.method,
+      resourceType: request.resourceType,
+      status: request.status,
+      mimeType: request.mimeType,
+      detail: 'response-body-unavailable',
+    });
+    return;
+  }
+
+  if (new TextEncoder().encode(source).byteLength > PLAYBACK_TRACE_MAX_YOUTUBE_RESPONSE_BYTES) {
+    appendPlaybackTraceEvent({
+      category: 'network',
+      name: 'youtube_ad_response_skipped',
+      url: redactPlaybackTraceUrl(request.url),
+      method: request.method,
+      resourceType: request.resourceType,
+      status: request.status,
+      mimeType: request.mimeType,
+      encodedDataLength: request.encodedDataLength,
+      detail: 'response-over-size-limit',
+    });
+    return;
+  }
+
+  const summary = summarizeYouTubeAdResponse(source);
+  if (!summary) {
+    appendPlaybackTraceEvent({
+      category: 'network',
+      name: 'youtube_ad_response_skipped',
+      url: redactPlaybackTraceUrl(request.url),
+      method: request.method,
+      resourceType: request.resourceType,
+      status: request.status,
+      mimeType: request.mimeType,
+      encodedDataLength: request.encodedDataLength,
+      detail: 'response-was-not-json-object',
+    });
+    return;
+  }
+
+  appendPlaybackTraceEvent({
+    category: 'network',
+    name: 'youtube_ad_response_summary',
+    url: redactPlaybackTraceUrl(request.url),
+    method: request.method,
+    resourceType: request.resourceType,
+    status: request.status,
+    mimeType: request.mimeType,
+    encodedDataLength: request.encodedDataLength,
+    detail: responseKind,
+    responseSummary: summary.fields,
+    summaryTruncated: summary.truncated,
+  });
+}
+
+function getYouTubeAdResponseKind(url: string, mimeType?: string): 'get_watch' | 'ad_break' | undefined {
+  if (mimeType?.split(';', 1)[0].trim().toLowerCase() !== 'application/json') return;
+  try {
+    const parsedUrl = new URL(url);
+    const hostname = parsedUrl.hostname.toLowerCase();
+    if (hostname !== 'youtube.com' && !hostname.endsWith('.youtube.com')) return;
+    if (parsedUrl.pathname === '/youtubei/v1/get_watch') return 'get_watch';
+    if (parsedUrl.pathname === '/youtubei/v1/player/ad_break') return 'ad_break';
+  } catch {
+    return;
   }
 }
 

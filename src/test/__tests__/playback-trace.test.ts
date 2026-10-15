@@ -9,6 +9,7 @@ import {
   PLAYBACK_TRACE_MAX_EVENTS,
   redactPlaybackTraceUrl,
   sanitizePlaybackManifest,
+  summarizeYouTubeAdResponse,
 } from '../../shared/utils/playback-trace';
 
 describe('playback trace utilities', () => {
@@ -110,5 +111,53 @@ describe('playback trace utilities', () => {
     expect(sanitizePlaybackManifest('<MPD mediaPresentationDuration="PT90S">')).toBeUndefined();
     expect(sanitizePlaybackManifest('<html><body>not a manifest</body></html>')).toBeUndefined();
     expect(sanitizePlaybackManifest('<!DOCTYPE MPD [<!ENTITY x "y">]><MPD/>')).toBeUndefined();
+  });
+
+  it('keeps only bounded, safe ad-decision and timing fields from YouTube JSON', () => {
+    const summary = summarizeYouTubeAdResponse(
+      JSON.stringify({
+        playerAds: {
+          adBreaks: [
+            {
+              startTime: 123.5,
+              endTimeOffset: '151.5',
+              duration: 28,
+              isSkippable: true,
+              adType: 'AD_BREAK_TYPE_MIDROLL',
+              adId: 'private-ad-id',
+              mediaUrl: 'https://media.example/video?signature=private',
+            },
+          ],
+        },
+        watchNext: { title: 'Private title', startTime: 999 },
+        eligibility: true,
+      }),
+    );
+
+    expect(summary).toEqual({
+      fields: [
+        { path: 'playerAds.adBreaks[0].startTime', value: 123.5 },
+        { path: 'playerAds.adBreaks[0].endTimeOffset', value: 151.5 },
+        { path: 'playerAds.adBreaks[0].duration', value: 28 },
+        { path: 'playerAds.adBreaks[0].isSkippable', value: true },
+        { path: 'playerAds.adBreaks[0].adType', value: 'midroll' },
+      ],
+      truncated: false,
+    });
+    expect(JSON.stringify(summary)).not.toContain('private');
+    expect(JSON.stringify(summary)).not.toContain('Private title');
+  });
+
+  it('bounds YouTube response summaries and rejects non-object JSON', () => {
+    expect(summarizeYouTubeAdResponse('null')).toBeUndefined();
+    const summary = summarizeYouTubeAdResponse(
+      JSON.stringify({
+        adBreaks: Array.from({ length: 101 }, (_, index) => ({
+          startTime: index,
+        })),
+      }),
+    );
+    expect(summary?.fields).toHaveLength(100);
+    expect(summary?.truncated).toBe(true);
   });
 });

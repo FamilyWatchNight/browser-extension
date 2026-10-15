@@ -62,6 +62,11 @@ export interface PlaybackTraceEvent {
   encodedDataLength?: number;
   manifestFormat?: 'dash-mpd' | 'hls';
   manifestText?: string;
+  responseSummary?: Array<{
+    path: string;
+    value: number | boolean | string;
+  }>;
+  summaryTruncated?: boolean;
   mediaTime?: number;
   previousMediaTime?: number;
   mediaTimes?: Array<{ videoId: string; currentTime: number }>;
