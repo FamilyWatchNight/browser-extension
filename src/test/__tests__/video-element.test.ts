@@ -86,7 +86,12 @@ describe('video-element', () => {
     video.dispatchEvent(new Event('play'));
 
     expect(onUpdate).toHaveBeenCalledTimes(4);
-    expect(onUpdate).toHaveBeenLastCalledWith({ duration: 90, currentTime: 12, paused: false });
+    expect(onUpdate).toHaveBeenLastCalledWith({
+      duration: 90,
+      currentTime: 12,
+      paused: false,
+      playbackRate: 1,
+    });
 
     cleanup();
     video.dispatchEvent(new Event('timeupdate'));

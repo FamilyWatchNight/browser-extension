@@ -38,7 +38,12 @@ export type PopupMessage =
 
 // Message types sent from background to popup/content script
 export type BackgroundMessage =
-  | { type: 'STATE_UPDATED'; state: ExtensionState; tabId?: number }
+  | {
+      type: 'STATE_UPDATED';
+      state: ExtensionState;
+      tabId?: number;
+      contentPlayhead?: ContentPlayheadState;
+    }
   | { type: 'CAPTION_STATE_UPDATED'; state: CaptionCaptureState }
   | { type: 'PLAYBACK_TRACE_UPDATED'; state: PlaybackTraceState }
   | { type: 'SETTINGS_CHANGED'; settings: ExtensionSettings };
@@ -135,12 +140,28 @@ export interface VideoElement {
   isVisible: boolean; // Whether the element is rendered and visible
   hasSource: boolean; // Whether the element has a media source
   readyState: number; // HTMLMediaElement ready state
+  playbackRate?: number;
+  seeking?: boolean;
+  buffering?: boolean;
 }
 
 export interface VideoPlaybackUpdate {
   currentTime: number;
   paused: boolean;
   duration: number;
+  playbackRate?: number;
+}
+
+export interface ContentPlayheadState {
+  videoId: string;
+  currentTime: number;
+  duration: number;
+  observedDuration: number;
+  observedAtMs: number;
+  playing: boolean;
+  playbackRate: number;
+  suspended: boolean;
+  confidence: 'medium' | 'high';
 }
 
 export interface ActionResponse {

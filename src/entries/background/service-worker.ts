@@ -9,6 +9,7 @@ import type {
   CaptionRetrievalResponse,
   CaptionSourceCandidate,
   ContentScriptMessage,
+  ContentPlayheadState,
   ExtensionSettings,
   ExtensionState,
   PlaybackTraceEndReason,
@@ -25,6 +26,7 @@ import {
   isWorthReadingCaptionResponse,
   validateCaptionPayload,
 } from '../../shared/utils/caption-validation';
+import { updateContentPlayhead } from '../../shared/utils/content-playhead';
 import {
   PLAYBACK_TRACE_CHUNK_SIZE,
   PLAYBACK_TRACE_MAX_BODY_BYTES,
@@ -64,6 +66,7 @@ const captionDiscoveryTasksByTab = new Map<number, Promise<CaptionDiscoveryRespo
 const CAPTION_STATE_STORAGE_KEY = 'captionCaptureStates';
 const PLAYBACK_TRACE_META_KEY = 'playbackTraceMeta';
 const PLAYBACK_TRACE_ALARM_PREFIX = 'playbackTrace:';
+const contentPlayheadsByTab = new Map<number, ContentPlayheadState>();
 
 type PersistedCaptionCaptureState = CaptionCaptureState & {
   cdpCandidates: CaptionSourceCandidate[];
@@ -255,6 +258,7 @@ chrome.runtime.onMessage.addListener(
 
       case 'VIDEO_STATE_UPDATE':
         useExtensionStore.getState().setVideos(message.videos);
+        updateTabContentPlayhead(sender.tab?.id, message.videos);
         broadcastState(sender.tab?.id);
         sendResponse({ success: true });
         return true;
@@ -326,6 +330,7 @@ chrome.runtime.onConnect.addListener((port) => {
 });
 
 chrome.tabs.onRemoved.addListener((tabId) => {
+  contentPlayheadsByTab.delete(tabId);
   captionCandidatesByTab.delete(tabId);
   cdpCandidatesByTab.delete(tabId);
   captionRetrievalsByTab.delete(tabId);
@@ -339,7 +344,14 @@ chrome.tabs.onRemoved.addListener((tabId) => {
 
 function broadcastState(tabId?: number) {
   const state = useExtensionStore.getState();
-  popupPorts.forEach((port) => port.postMessage({ type: 'STATE_UPDATED', state, tabId }));
+  popupPorts.forEach((port) =>
+    port.postMessage({
+      type: 'STATE_UPDATED',
+      state,
+      tabId,
+      contentPlayhead: tabId === undefined ? undefined : contentPlayheadsByTab.get(tabId),
+    }),
+  );
 }
 
 function handleGetVideoElements(tabId: number, sendResponse: (data: VideoElement[]) => void) {
@@ -349,8 +361,17 @@ function handleGetVideoElements(tabId: number, sendResponse: (data: VideoElement
   }
 
   chrome.tabs.sendMessage(tabId, { type: 'GET_VIDEO_ELEMENTS' }, (response) => {
-    sendResponse(response || []);
+    const videos = Array.isArray(response) ? (response as VideoElement[]) : [];
+    updateTabContentPlayhead(tabId, videos);
+    sendResponse(videos);
   });
+}
+
+function updateTabContentPlayhead(tabId: number | undefined, videos: VideoElement[]): void {
+  if (tabId === undefined) return;
+  const state = updateContentPlayhead(contentPlayheadsByTab.get(tabId), videos, Date.now());
+  if (state) contentPlayheadsByTab.set(tabId, state);
+  else contentPlayheadsByTab.delete(tabId);
 }
 
 function handleDiscoverCaptionSources(

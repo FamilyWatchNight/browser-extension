@@ -1,16 +1,22 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 
 import type {
   CaptionCaptureState,
   CaptionDiscoveryResponse,
   CaptionRetrievalResponse,
+  ContentPlayheadState,
   ExtensionState,
   PlaybackTraceResponse,
   PlaybackTraceState,
-  ScreenshotBounds,
   VideoElement,
+  ScreenshotBounds,
 } from '../../shared/messages';
 import { exportNormalizedWebVtt } from '../../shared/utils/caption-normalize';
+import {
+  formatPlaybackTime,
+  getInterpolatedContentTime,
+  updateContentPlayhead,
+} from '../../shared/utils/content-playhead';
 import { connectToServiceWorker } from '../../shared/utils/extension-api';
 import { PLAYBACK_TRACE_MAX_DURATION_MS } from '../../shared/utils/playback-trace';
 import { useExtensionStore } from '../../state/store';
@@ -18,6 +24,11 @@ import { useExtensionStore } from '../../state/store';
 export default function PopupApp() {
   const { isEnabled, setEnabled } = useExtensionStore();
   const [localVideos, setLocalVideos] = useState<VideoElement[]>([]);
+  const [contentPlayhead, setContentPlayhead] = useState<ContentPlayheadState | undefined>(
+    undefined,
+  );
+  const contentPlayheadRef = useRef<ContentPlayheadState | undefined>(undefined);
+  const [clockNow, setClockNow] = useState(() => Date.now());
   const [selectedVideoId, setSelectedVideoId] = useState<string | undefined>();
   const [audioCaptureActive, setAudioCaptureActive] = useState(false);
   const [audioCaptureMode, setAudioCaptureMode] = useState<'video' | 'tab' | undefined>();
@@ -39,7 +50,15 @@ export default function PopupApp() {
   const [, setPort] = useState<chrome.runtime.Port | null>(null);
 
   const updateVideos = useCallback((videos: VideoElement[]) => {
-    setLocalVideos(videos.map(normalizeVideo));
+    const normalizedVideos = videos.map(normalizeVideo);
+    setLocalVideos(normalizedVideos);
+    const nextPlayhead = updateContentPlayhead(
+      contentPlayheadRef.current,
+      normalizedVideos,
+      Date.now(),
+    );
+    contentPlayheadRef.current = nextPlayhead;
+    setContentPlayhead(nextPlayhead);
     setSelectedVideoId((currentId) =>
       currentId && videos.some((video) => video.id === currentId) ? currentId : videos[0]?.id,
     );
@@ -53,6 +72,14 @@ export default function PopupApp() {
       isVisible: video.isVisible ?? false,
       hasSource: video.hasSource ?? Boolean(video.src),
       readyState: Number.isFinite(video.readyState) ? video.readyState : 0,
+      playbackRate:
+        video.playbackRate !== undefined &&
+        Number.isFinite(video.playbackRate) &&
+        video.playbackRate > 0
+          ? video.playbackRate
+          : 1,
+      seeking: video.seeking ?? false,
+      buffering: video.buffering ?? (!video.paused && video.readyState < 3),
     };
   }
 
@@ -87,10 +114,15 @@ export default function PopupApp() {
       type: string;
       state: ExtensionState | CaptionCaptureState | PlaybackTraceState;
       tabId?: number;
+      contentPlayhead?: ContentPlayheadState;
     }) => {
       if (message.type === 'STATE_UPDATED') {
         if (message.tabId !== undefined && message.tabId === activeTabId) {
           updateVideos((message.state as ExtensionState).videos);
+          if (message.contentPlayhead) {
+            contentPlayheadRef.current = message.contentPlayhead;
+            setContentPlayhead(message.contentPlayhead);
+          }
         }
       } else if (
         message.type === 'CAPTION_STATE_UPDATED' &&
@@ -124,6 +156,11 @@ export default function PopupApp() {
       newPort.disconnect();
     };
   }, [fetchVideoElements, updateVideos]);
+
+  useEffect(() => {
+    const timer = window.setInterval(() => setClockNow(Date.now()), 100);
+    return () => window.clearInterval(timer);
+  }, []);
 
   async function runPlaybackTraceAction(action: 'start' | 'stop' | 'export' | 'delete') {
     setPlaybackTraceBusy(true);
@@ -504,6 +541,8 @@ export default function PopupApp() {
     return canvas.toDataURL('image/jpeg', 0.9);
   }
 
+  const contentTime = getInterpolatedContentTime(contentPlayhead, clockNow);
+
   return (
     <div style={{ padding: '16px' }}>
       <h2 style={{ margin: '0 0 16px 0' }}>Virtual Remote Control</h2>
@@ -645,6 +684,24 @@ export default function PopupApp() {
                   </button>
                 );
               })}
+            </div>
+          )}
+
+          {contentPlayhead && contentTime !== undefined && (
+            <div
+              role="timer"
+              aria-label="Content playback position"
+              style={{
+                display: 'flex',
+                justifyContent: 'flex-start',
+                alignItems: 'center',
+                marginBottom: '8px',
+                fontVariantNumeric: 'tabular-nums',
+                fontSize: '14px',
+              }}
+            >
+              {formatPlaybackTime(contentTime, true)} /{' '}
+              {formatPlaybackTime(contentPlayhead.duration, false)}
             </div>
           )}
 

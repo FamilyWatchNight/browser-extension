@@ -88,6 +88,42 @@ describe('popup video discovery', () => {
     expect(screen.getByText('Found 1 video(s)')).toBeTruthy();
   });
 
+  it('shows and updates the content playhead above the video controls', async () => {
+    chromeFixture.chrome.tabs.sendMessage = vi.fn().mockResolvedValue([
+      {
+        id: 'movie',
+        src: 'movie.mp4',
+        title: 'Movie',
+        duration: 125,
+        currentTime: 10,
+        paused: false,
+        frameIndex: 0,
+        width: 1280,
+        height: 720,
+        isVisible: true,
+        hasSource: true,
+        readyState: 4,
+        playbackRate: 1,
+        seeking: false,
+      },
+    ]);
+
+    render(<PopupApp />);
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    const timer = screen.getByRole('timer', { name: 'Content playback position' });
+    expect(timer.textContent).toBe('0:10.0 / 2:05');
+    expect(timer.compareDocumentPosition(screen.getByRole('button', { name: /▶ Play/ })) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1000);
+    });
+
+    expect(timer.textContent).toBe('0:11.0 / 2:05');
+  });
+
   it('does not replace active-tab videos with unscoped or other-tab state', async () => {
     const video = {
       id: 'video-1',

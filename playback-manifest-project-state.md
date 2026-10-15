@@ -78,6 +78,40 @@ place is a display/update resolution, not a promise of 100 ms measurement
 accuracy. Preserve uncertainty internally; when evidence is insufficient,
 prefer an unavailable value to a falsely precise timer or ad label.
 
+### Initial implementation status
+
+Goals 1 and 2 have an initial behavior-driven implementation. The extension
+now samples video playback rate, seeking, and buffering state; selects a
+likely content video using duration, visibility, rendered area, and activity;
+and maintains a per-tab content-playhead estimate. The popup interpolates
+between observations while open and displays current position to tenths of a
+second and duration to whole seconds in the requested row above the controls.
+This is a first heuristic, not a guarantee that every player timeline is
+content-relative.
+
+The current model holds the content clock when the selected element's
+duration becomes substantially shorter than its established baseline, and
+re-anchors when a much longer timeline returns. Playhead state is currently
+kept in background memory, not persisted. The popup timer is only a display
+of the best current estimate; it does not yet show ad state, block countdowns,
+or next-ad estimates. Goal 3 (Export analysis) and all later goals remain
+unimplemented.
+
+Known limitations to guide interpretation and testing:
+
+- If the first observed timeline is already an ad, the extension cannot yet
+  reliably distinguish it from short-form content until further behavior is
+  observed.
+- A stitched timeline whose duration stays constant while media time
+  advances through ads (as observed in the Pluto evidence) is not yet
+  normalized; the displayed clock may include ad time in that case.
+- Duration changes and element ranking are heuristic signals, not proof of
+  content/ad identity. A seek, source change, or unusual player transition
+  can still produce an imperfect estimate.
+- The background state is volatile and service-worker suspension behavior
+  has not been verified. Popup-side interpolation keeps the display moving
+  between received snapshots, but does not make the underlying state durable.
+
 Related context: [caption-capture-project-state.md](caption-capture-project-state.md)
 records the caption-discovery work and current provider evidence. YouTube,
 Prime Video, and Tubi have a user-confirmed caption discovery, retrieval, and

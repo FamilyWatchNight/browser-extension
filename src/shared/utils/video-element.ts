@@ -17,6 +17,9 @@ export function createVideoElementSnapshot(
     duration: video.duration || 0,
     currentTime: video.currentTime || 0,
     paused: video.paused,
+    playbackRate: Number.isFinite(video.playbackRate) ? video.playbackRate : 1,
+    seeking: video.seeking,
+    buffering: !video.paused && video.readyState < 3,
     frameIndex,
     width,
     height,
@@ -48,18 +51,28 @@ export function setupVideoListeners(
       currentTime: video.currentTime,
       paused: video.paused,
       duration: video.duration,
+      playbackRate: video.playbackRate,
     });
   };
 
-  video.addEventListener('play', updateState);
-  video.addEventListener('pause', updateState);
-  video.addEventListener('timeupdate', updateState);
-  video.addEventListener('loadedmetadata', updateState);
+  const eventNames = [
+    'play',
+    'playing',
+    'pause',
+    'timeupdate',
+    'loadedmetadata',
+    'durationchange',
+    'seeking',
+    'seeked',
+    'waiting',
+    'ended',
+    'ratechange',
+    'emptied',
+    'loadstart',
+  ];
+  eventNames.forEach((name) => video.addEventListener(name, updateState));
 
   return () => {
-    video.removeEventListener('play', updateState);
-    video.removeEventListener('pause', updateState);
-    video.removeEventListener('timeupdate', updateState);
-    video.removeEventListener('loadedmetadata', updateState);
+    eventNames.forEach((name) => video.removeEventListener(name, updateState));
   };
 }
