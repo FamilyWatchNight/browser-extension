@@ -24,6 +24,7 @@ export type PopupMessage =
   | { type: 'STOP_PLAYBACK_TRACE'; tabId: number }
   | { type: 'DELETE_PLAYBACK_TRACE' }
   | { type: 'EXPORT_PLAYBACK_TRACE' }
+  | { type: 'EXPORT_PLAYBACK_ANALYSIS'; tabId: number }
   | { type: 'DISCOVER_CAPTION_SOURCES'; tabId: number }
   | {
       type: 'SET_CAPTION_CDP_MONITORING';
@@ -123,6 +124,12 @@ export interface PlaybackTraceResponse {
   success: boolean;
   state?: PlaybackTraceState;
   events?: PlaybackTraceEvent[];
+  error?: string;
+}
+
+export interface PlaybackAnalysisExportResponse {
+  success: boolean;
+  report?: string;
   error?: string;
 }
 

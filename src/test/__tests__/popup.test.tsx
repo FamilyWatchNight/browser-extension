@@ -124,6 +124,35 @@ describe('popup video discovery', () => {
     expect(timer.textContent).toBe('0:11.0 / 2:05');
   });
 
+  it('requests and downloads a local playback analysis report', async () => {
+    const report = '# Playback analysis report\n\nConfidence: medium';
+    chromeFixture.chrome.tabs.sendMessage = vi.fn().mockResolvedValue([]);
+    chromeFixture.chrome.runtime.sendMessage.mockResolvedValue({
+      success: true,
+      report,
+    });
+    const createObjectUrl = vi.spyOn(URL, 'createObjectURL').mockReturnValue('blob:analysis');
+    const anchorClick = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {});
+
+    render(<PopupApp />);
+    await act(async () => {
+      await Promise.resolve();
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Export analysis' }));
+      await Promise.resolve();
+    });
+
+    expect(chromeFixture.chrome.runtime.sendMessage).toHaveBeenCalledWith({
+      type: 'EXPORT_PLAYBACK_ANALYSIS',
+      tabId: 1,
+    });
+    expect(createObjectUrl).toHaveBeenCalledWith(
+      expect.objectContaining({ type: 'text/markdown;charset=utf-8' }),
+    );
+    expect(anchorClick).toHaveBeenCalledOnce();
+  });
+
   it('does not replace active-tab videos with unscoped or other-tab state', async () => {
     const video = {
       id: 'video-1',

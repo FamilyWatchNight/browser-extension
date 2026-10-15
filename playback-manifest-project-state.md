@@ -91,11 +91,19 @@ content-relative.
 
 The current model holds the content clock when the selected element's
 duration becomes substantially shorter than its established baseline, and
-re-anchors when a much longer timeline returns. Playhead state is currently
-kept in background memory, not persisted. The popup timer is only a display
-of the best current estimate; it does not yet show ad state, block countdowns,
-or next-ad estimates. Goal 3 (Export analysis) and all later goals remain
-unimplemented.
+re-anchors when a much longer timeline returns. Playhead state and the
+analysis ledger are currently kept in background memory, not persisted. The
+popup timer is only a display of the best current estimate; it does not yet
+show ad state, block countdowns, or next-ad estimates.
+
+Goal 3 (Export analysis) is implemented as a user-invoked Markdown download.
+The background keeps a per-tab ledger of bounded behavioral snapshots and
+interpretations; the report summarizes the current estimate, confidence,
+evidence, reasoning version, and limitations. It samples significant changes
+and periodic observations, retains at most 120 evidence points, and omits
+page titles/text, URLs, element identifiers, network data, and response
+bodies. The export is generated locally and is not transmitted automatically.
+Goals 4 and later remain unimplemented.
 
 Known limitations to guide interpretation and testing:
 
@@ -111,6 +119,9 @@ Known limitations to guide interpretation and testing:
 - The background state is volatile and service-worker suspension behavior
   has not been verified. Popup-side interpolation keeps the display moving
   between received snapshots, but does not make the underlying state durable.
+  A worker restart can therefore reset both the playhead and evidence ledger;
+  the report identifies itself as heuristic and may contain incomplete
+  history.
 
 Related context: [caption-capture-project-state.md](caption-capture-project-state.md)
 records the caption-discovery work and current provider evidence. YouTube,
@@ -243,12 +254,11 @@ not transmit it automatically. The report should state that its conclusions
 are heuristic, identify gaps, and distinguish directly observed facts from
 inferences.
 
-An implementation can keep the ledger in memory during active playback and
-bound its event count/retention window. Export need not include every
-per-frame time update: summarize stable intervals and retain detailed
-evidence around state changes, seeks, source changes, and confidence changes.
-This keeps the report useful without creating another unbounded playback
-trace. The report is a planned diagnostic feature, not implemented behavior.
+The initial implementation keeps the ledger in memory per tab, bounds it to
+120 retained evidence points, and samples meaningful state changes plus
+periodic playback snapshots rather than exporting every time update. Its
+reasoning version is included in the report so future iterations can be
+compared without creating another unbounded playback trace.
 
 ### Ad-block and next-ad estimates
 
@@ -843,15 +853,12 @@ Additional service experiments and broad manifest gathering are paused at the
 user's request. The evidence record above is the current basis for design, not
 a claim that every heuristic is already validated.
 
-The logical next development work is to implement the shared observable-media
-model and internal content clock before adding popup presentation. Use
-offline fixtures from the existing Amazon, Pluto, Tubi, and YouTube traces,
-plus synthetic transitions, to test video-element selection, pause/buffer
-handling, seeks, resume offsets, duration changes, separate ad elements,
-same-element timeline changes, uncertainty handling, and evidence-ledger
-explanations. Then add the popup row, optional ad labels/countdowns, and
-user-invoked analysis export in priority order, making sure the report can
-explain a surprising or low-confidence result. Do not schedule new manifest
+Goals 1-3 now have initial implementations: a behavior-driven content clock,
+its popup display, and a user-invoked local analysis export. Continue with ad
+detection and indicators in the stated priority order, using offline fixtures
+from existing service traces and synthetic transitions. Keep the report
+aligned with every subsequent change to the clock or ad reasoning so it can
+explain surprising or low-confidence results. Do not schedule new manifest
 experiments unless implementation tests reveal a concrete unresolved behavior
 that blocks a prioritized goal.
 

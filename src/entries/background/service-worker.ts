@@ -14,6 +14,7 @@ import type {
   ExtensionState,
   PlaybackTraceEndReason,
   PlaybackTraceEvent,
+  PlaybackAnalysisExportResponse,
   PlaybackTraceResponse,
   PlaybackTraceState,
   PopupMessage,
@@ -27,6 +28,11 @@ import {
   validateCaptionPayload,
 } from '../../shared/utils/caption-validation';
 import { updateContentPlayhead } from '../../shared/utils/content-playhead';
+import {
+  createPlaybackAnalysisReport,
+  recordPlaybackAnalysisObservation,
+  type PlaybackAnalysisLedger,
+} from '../../shared/utils/playback-analysis';
 import {
   PLAYBACK_TRACE_CHUNK_SIZE,
   PLAYBACK_TRACE_MAX_BODY_BYTES,
@@ -67,6 +73,7 @@ const CAPTION_STATE_STORAGE_KEY = 'captionCaptureStates';
 const PLAYBACK_TRACE_META_KEY = 'playbackTraceMeta';
 const PLAYBACK_TRACE_ALARM_PREFIX = 'playbackTrace:';
 const contentPlayheadsByTab = new Map<number, ContentPlayheadState>();
+const playbackAnalysesByTab = new Map<number, PlaybackAnalysisLedger>();
 
 type PersistedCaptionCaptureState = CaptionCaptureState & {
   cdpCandidates: CaptionSourceCandidate[];
@@ -191,6 +198,9 @@ chrome.runtime.onMessage.addListener(
         void exportPlaybackTrace()
           .then(sendResponse)
           .catch((error) => sendResponse({ success: false, error: formatError(error) }));
+        return true;
+      case 'EXPORT_PLAYBACK_ANALYSIS':
+        handleExportPlaybackAnalysis(message.tabId, sendResponse);
         return true;
       case 'PLAYBACK_TRACE_CONTENT_READY':
         if (sender.tab?.id !== undefined) {
@@ -331,6 +341,7 @@ chrome.runtime.onConnect.addListener((port) => {
 
 chrome.tabs.onRemoved.addListener((tabId) => {
   contentPlayheadsByTab.delete(tabId);
+  playbackAnalysesByTab.delete(tabId);
   captionCandidatesByTab.delete(tabId);
   cdpCandidatesByTab.delete(tabId);
   captionRetrievalsByTab.delete(tabId);
@@ -340,6 +351,12 @@ chrome.tabs.onRemoved.addListener((tabId) => {
   captionDiscoveryTasksByTab.delete(tabId);
   debuggerCapturePausersByTab.get(tabId)?.();
   void persistCaptionStates();
+});
+
+chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
+  if (changeInfo.status !== 'loading' && changeInfo.url === undefined) return;
+  contentPlayheadsByTab.delete(tabId);
+  playbackAnalysesByTab.delete(tabId);
 });
 
 function broadcastState(tabId?: number) {
@@ -369,9 +386,35 @@ function handleGetVideoElements(tabId: number, sendResponse: (data: VideoElement
 
 function updateTabContentPlayhead(tabId: number | undefined, videos: VideoElement[]): void {
   if (tabId === undefined) return;
-  const state = updateContentPlayhead(contentPlayheadsByTab.get(tabId), videos, Date.now());
+  const previous = contentPlayheadsByTab.get(tabId);
+  const observedAtMs = Date.now();
+  const state = updateContentPlayhead(previous, videos, observedAtMs);
   if (state) contentPlayheadsByTab.set(tabId, state);
   else contentPlayheadsByTab.delete(tabId);
+  playbackAnalysesByTab.set(
+    tabId,
+    recordPlaybackAnalysisObservation(
+      playbackAnalysesByTab.get(tabId),
+      videos,
+      previous,
+      state,
+      observedAtMs,
+    ),
+  );
+}
+
+function handleExportPlaybackAnalysis(
+  tabId: number,
+  sendResponse: (response: PlaybackAnalysisExportResponse) => void,
+): void {
+  sendResponse({
+    success: true,
+    report: createPlaybackAnalysisReport(
+      playbackAnalysesByTab.get(tabId),
+      contentPlayheadsByTab.get(tabId),
+      Date.now(),
+    ),
+  });
 }
 
 function handleDiscoverCaptionSources(

@@ -6,6 +6,7 @@ import type {
   CaptionRetrievalResponse,
   ContentPlayheadState,
   ExtensionState,
+  PlaybackAnalysisExportResponse,
   PlaybackTraceResponse,
   PlaybackTraceState,
   VideoElement,
@@ -47,6 +48,8 @@ export default function PopupApp() {
   const [playbackTraceState, setPlaybackTraceState] = useState<PlaybackTraceState>();
   const [playbackTraceBusy, setPlaybackTraceBusy] = useState(false);
   const [playbackTraceError, setPlaybackTraceError] = useState<string>();
+  const [playbackAnalysisBusy, setPlaybackAnalysisBusy] = useState(false);
+  const [playbackAnalysisError, setPlaybackAnalysisError] = useState<string>();
   const [, setPort] = useState<chrome.runtime.Port | null>(null);
 
   const updateVideos = useCallback((videos: VideoElement[]) => {
@@ -213,6 +216,37 @@ export default function PopupApp() {
       setPlaybackTraceError(message);
     } finally {
       setPlaybackTraceBusy(false);
+    }
+  }
+
+  async function exportPlaybackAnalysis() {
+    setPlaybackAnalysisBusy(true);
+    setPlaybackAnalysisError(undefined);
+    try {
+      const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+      if (tab.id === undefined) throw new Error('No active tab is available for analysis export.');
+      const response = (await chrome.runtime.sendMessage({
+        type: 'EXPORT_PLAYBACK_ANALYSIS',
+        tabId: tab.id,
+      })) as PlaybackAnalysisExportResponse;
+      if (!response?.success || !response.report) {
+        throw new Error(response?.error || 'Playback analysis export failed.');
+      }
+
+      const objectUrl = URL.createObjectURL(
+        new Blob([response.report], { type: 'text/markdown;charset=utf-8' }),
+      );
+      const link = document.createElement('a');
+      link.href = objectUrl;
+      link.download = `playback-analysis-${new Date().toISOString().replace(/[:.]/g, '-')}.md`;
+      link.click();
+      window.setTimeout(() => URL.revokeObjectURL(objectUrl), 1000);
+    } catch (error) {
+      setPlaybackAnalysisError(
+        error instanceof Error ? error.message : String(error),
+      );
+    } finally {
+      setPlaybackAnalysisBusy(false);
     }
   }
 
@@ -645,6 +679,24 @@ export default function PopupApp() {
           </div>
         )}
       </section>
+
+      <div style={{ marginBottom: '12px' }}>
+        <button
+          onClick={() => void exportPlaybackAnalysis()}
+          disabled={playbackAnalysisBusy}
+          style={{ padding: '6px 8px' }}
+        >
+          {playbackAnalysisBusy ? 'Preparing analysis…' : 'Export analysis'}
+        </button>
+        <span style={{ marginLeft: '6px', fontSize: '11px', color: '#666' }}>
+          Local report; no titles, URLs, or network data.
+        </span>
+        {playbackAnalysisError && (
+          <div role="alert" style={{ marginTop: '6px', color: '#b91c1c', fontSize: '12px' }}>
+            {playbackAnalysisError}
+          </div>
+        )}
+      </div>
 
       {localVideos.length > 0 ? (
         <>

@@ -52,6 +52,54 @@ describe('service-worker message contracts', () => {
     expect(sendResponse).toHaveBeenCalledWith(videos);
   });
 
+  it('exports a per-tab analysis using bounded, redacted playback evidence', async () => {
+    await import('../../entries/background/service-worker');
+
+    const video = {
+      id: 'private-element-id',
+      src: 'https://private.example/movie?token=secret',
+      title: 'Private title',
+      duration: 3600,
+      currentTime: 42,
+      paused: false,
+      frameIndex: 0,
+      width: 1280,
+      height: 720,
+      isVisible: true,
+      hasSource: true,
+      readyState: 4,
+      playbackRate: 1,
+      seeking: false,
+      buffering: false,
+    };
+    const updateResponse = vi.fn();
+    chromeFixture.messageListeners[0](
+      { type: 'VIDEO_STATE_UPDATE', videos: [video] },
+      { tab: { id: 42 } },
+      updateResponse,
+    );
+
+    const exportResponse = vi.fn();
+    chromeFixture.messageListeners[0](
+      { type: 'EXPORT_PLAYBACK_ANALYSIS', tabId: 42 },
+      {},
+      exportResponse,
+    );
+
+    expect(exportResponse).toHaveBeenCalledWith(
+      expect.objectContaining({
+        success: true,
+        report: expect.stringContaining('generic video behavior'),
+      }),
+    );
+    const report = exportResponse.mock.calls[0][0].report as string;
+    expect(report).toContain('0:42.0 / 1:00:00');
+    expect(report).not.toContain('private-element-id');
+    expect(report).not.toContain('Private title');
+    expect(report).not.toContain('private.example');
+    expect(report).not.toContain('secret');
+  });
+
   it('captures and exports redacted metadata without reloading the tab', async () => {
     await import('../../entries/background/service-worker');
 
