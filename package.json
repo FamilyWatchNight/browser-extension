@@ -15,7 +15,7 @@
     "test:browser": "npm run build && playwright test"
   },
   "dependencies": {
-    "@types/chrome": "^0.3.5",
+    "@types/chrome": "^0.3.7",
     "react": "^19.3.1",
     "react-dom": "^19.3.1",
     "zustand": "^5.0.15"
