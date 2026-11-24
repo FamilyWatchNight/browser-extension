@@ -23,7 +23,7 @@
   "devDependencies": {
     "@crxjs/vite-plugin": "^3.0.0",
     "@eslint-community/eslint-utils": "^4.10.1",
-    "@eslint-react/eslint-plugin": "^5.30.4",
+    "@eslint-react/eslint-plugin": "^5.30.5",
     "@eslint/js": "^10.0.1",
     "@playwright/test": "^1.65.0",
     "@testing-library/dom": "^10.4.2",
